@@ -27,6 +27,24 @@ ADMIN_EMAIL=admin@example.com bash vps-install.sh
 Pick a VPS provider that allows port 25 (often needs a quick support ticket) and
 lets you set reverse DNS — e.g. Hetzner, OVH, Vultr, DigitalOcean.
 
+**Full step-by-step runbook (before / run / after):**
+[../docs/vps-install.md](../docs/vps-install.md).
+
+The installer prompts for the mail/dashboard hostnames, admin email, and an
+optional Cloudflare token; everything else (DB/Redis/JWT/Fernet secrets, admin
+password) is generated. It also warns if outbound port 25 is blocked, and can
+configure the firewall. Useful flags:
+
+| Var | Effect |
+|---|---|
+| `ADMIN_PASSWORD` | choose the admin password (else generated) |
+| `CLOUDFLARE_API_TOKEN` | enable dashboard DNS publish/verify |
+| `SETUP_UFW=1` | configure the firewall non-interactively |
+| `FORCE=1` | regenerate `.env` (rotates secrets) on a re-run |
+| `REPO_BRANCH` / `GITHUB_TOKEN` | source branch / private-repo clone |
+
+Re-running is safe — an existing `.env` is preserved unless `FORCE=1`.
+
 ---
 
 ## Proxmox helper script
