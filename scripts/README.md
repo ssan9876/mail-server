@@ -1,4 +1,35 @@
-# Proxmox helper script
+# Deployment scripts
+
+- **`vps-install.sh`** — run on a fresh **Ubuntu 24.04 VPS** (as root) to install
+  Docker, clone the repo, generate a `.env` with strong secrets, and launch the
+  stack. This is the recommended path for a *public* mail server (a VPS gives you
+  the real IP, open port 25, and PTR control that a home connection can't).
+- **`proxmox-create-lxc.sh`** — run on a **Proxmox VE host** to auto-create an
+  LXC and deploy into it. Best for a home lab / internal mail.
+
+> A mail server cannot run behind a Cloudflare Tunnel or NAT-only home link:
+> external servers deliver over port 25 to your real IP, and you need a PTR
+> record. Residential ISPs almost always block port 25.
+
+## VPS quick start
+
+```bash
+# Public repo / after PR #1 is merged to main:
+MAIL_HOSTNAME=mail.example.com WEB_HOSTNAME=admin.example.com \
+ADMIN_EMAIL=admin@example.com bash vps-install.sh
+
+# Private repo on the PR branch (token = a PAT with repo read access):
+GITHUB_TOKEN=ghp_xxx REPO_BRANCH=build/mail-server-platform \
+MAIL_HOSTNAME=mail.example.com WEB_HOSTNAME=admin.example.com \
+ADMIN_EMAIL=admin@example.com bash vps-install.sh
+```
+
+Pick a VPS provider that allows port 25 (often needs a quick support ticket) and
+lets you set reverse DNS — e.g. Hetzner, OVH, Vultr, DigitalOcean.
+
+---
+
+## Proxmox helper script
 
 `proxmox-create-lxc.sh` provisions the entire mail-server stack into a fresh
 Ubuntu 24.04 LXC container on a Proxmox VE host — create container → install
