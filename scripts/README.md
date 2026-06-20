@@ -75,14 +75,31 @@ bash proxmox-create-lxc.sh
 | `CTID` | next free id | container id |
 | `CT_HOSTNAME` | `mailserver` | container hostname |
 | `CORES` / `RAM_MB` / `SWAP_MB` / `DISK_GB` | `2` / `4096` / `2048` / `16` | sizing |
-| `STORAGE` | `local-lvm` | rootfs storage |
-| `BRIDGE` | `vmbr0` | network bridge |
+| `STORAGE` | auto-detect (prefers `local-lvm`) | rootfs storage — falls back to the first storage with `rootdir` content |
+| `BRIDGE` | `vmbr0` | network bridge (validated against `ip link`) |
 | `NET_IP` | `dhcp` | e.g. `192.168.1.50/24,gw=192.168.1.1` for static |
-| `TEMPLATE_STORAGE` | `local` | where the LXC template lives |
+| `TEMPLATE_STORAGE` | auto-detect (prefers `local`) | first storage with `vztmpl` content |
 | `PRIVILEGED` | `1` | `0` for an unprivileged container (PVE 8+) |
 | `REPO_URL` / `REPO_BRANCH` | this repo / `main` | source to deploy |
+| `GITHUB_TOKEN` | empty | PAT for cloning a **private** repo |
 | `CLOUDFLARE_API_TOKEN` | empty | optional; enables DNS automation |
 | `ADMIN_PASSWORD` | random | set to choose your own |
+| `DEBUG` | `0` | `1` for `set -x` tracing |
+
+## Troubleshooting "it didn't create the container"
+
+The refactored script auto-detects storage, validates the bridge/CTID, and
+prints the exact failing step (with line number) instead of exiting silently.
+The usual causes:
+
+- **Storage name** — older versions assumed `local-lvm`. It now detects a
+  storage with `rootdir` content; override with `STORAGE=` if needed
+  (`pvesm status` lists them).
+- **Private repo** — if the clone fails, pass `GITHUB_TOKEN=<PAT>` and (until
+  PR #1 is merged) `REPO_BRANCH=build/mail-server-platform`.
+- **Curl one-liner 404** — the `main` raw URL only works once the script is on
+  `main`; before then, copy the script from the PR branch and run it locally.
+- Re-run with `DEBUG=1` to see every command.
 
 ## After it runs
 
