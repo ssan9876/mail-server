@@ -46,6 +46,9 @@ ok()   { echo "${GRN}✓${NC} $*"; }
 warn() { echo "${YLW}!${NC} $*"; }
 die()  { echo "${RED}✗ $*${NC}" >&2; exit 1; }
 
+# Surface the exact failing command/line instead of dying silently.
+trap 'rc=$?; echo "${RED}✗ aborted at line ${LINENO}: ${BASH_COMMAND} (exit ${rc})${NC}" >&2' ERR
+
 # --- Preflight --------------------------------------------------------------
 [[ $EUID -eq 0 ]] || die "Run as root on the Proxmox host."
 command -v pct  >/dev/null || die "pct not found — run this on a Proxmox VE host."
@@ -73,7 +76,9 @@ ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"   # generated below if empty
 CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
 
 # --- Secret generation (on the host; pushed into the container) -------------
-rand_alnum() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${1:-32}"; }
+# Use `openssl rand -hex` + bash slicing — no `head` closing a pipe (which would
+# SIGPIPE `tr` and, under pipefail+errexit, kill the script silently).
+rand_alnum() { local n="${1:-32}" s; s="$(openssl rand -hex "$n")"; printf '%s' "${s:0:n}"; }
 # A valid Fernet key = url-safe base64 of 32 random bytes.
 fernet_key() { openssl rand -base64 32 | tr '+/' '-_'; }
 
