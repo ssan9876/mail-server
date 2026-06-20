@@ -19,7 +19,7 @@ user_query = \
   SELECT '/maildata/' || d.name || '/' || m.local_part AS home, \
          'maildir:/maildata/' || d.name || '/' || m.local_part AS mail, \
          5000 AS uid, 5000 AS gid, \
-         ('*:bytes=' || (m.quota_mb * 1048576)) AS quota_rule \
+         ('*:bytes=' || (m.quota_mb::bigint * 1048576)) AS quota_rule \
   FROM mailboxes m JOIN domains d ON m.domain_id = d.id \
   WHERE m.local_part = '%n' AND d.name = '%d' \
     AND m.is_active = true AND d.is_active = true
