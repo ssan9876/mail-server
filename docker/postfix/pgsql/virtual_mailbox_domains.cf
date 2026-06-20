@@ -1,0 +1,6 @@
+# Which domains do we accept mail for? (template — ${...} filled at startup)
+hosts = ${POSTGRES_HOST}
+user = ${POSTGRES_MAIL_USER}
+password = ${POSTGRES_MAIL_PASSWORD}
+dbname = ${POSTGRES_DB}
+query = SELECT 1 FROM domains WHERE name='%s' AND is_active=true

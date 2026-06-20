@@ -1,0 +1,7 @@
+# Map every real mailbox to itself. Consulted BEFORE the catch-all so that an
+# existing mailbox is never swallowed by a domain catch-all alias.
+hosts = ${POSTGRES_HOST}
+user = ${POSTGRES_MAIL_USER}
+password = ${POSTGRES_MAIL_PASSWORD}
+dbname = ${POSTGRES_DB}
+query = SELECT m.local_part || '@' || d.name FROM mailboxes m JOIN domains d ON m.domain_id = d.id WHERE m.local_part='%u' AND d.name='%d' AND m.is_active=true AND d.is_active=true

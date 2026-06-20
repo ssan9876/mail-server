@@ -1,0 +1,30 @@
+# --- Web framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+gunicorn==23.0.0
+
+# --- Data / ORM ---
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+psycopg2-binary==2.9.10
+
+# --- Validation / settings ---
+pydantic==2.10.4
+pydantic-settings==2.7.1
+email-validator==2.2.0
+
+# --- Security ---
+passlib[bcrypt]==1.7.4
+argon2-cffi==23.1.0
+python-jose[cryptography]==3.3.0
+cryptography==44.0.0
+
+# --- Infra clients ---
+redis==5.2.1
+httpx==0.28.1
+slowapi==0.1.9
+
+# --- Utilities ---
+python-multipart==0.0.20
+dnspython==2.7.0

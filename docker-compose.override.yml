@@ -1,0 +1,50 @@
+# ============================================================================
+# Development overrides — auto-merged by `docker compose` on top of the base
+# file. Hot-reload, exposed datastore ports, and a local mail catcher.
+#
+# In production, run with:  docker compose -f docker-compose.yml up -d
+# (the -f flag prevents this override from being applied).
+# ============================================================================
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"   # expose for local psql / GUI clients
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      target: dev     # multi-stage: install dev deps, no gunicorn
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./backend:/app           # live code mount for --reload
+      - dkim_keys:/dkim
+      - postfix_maps:/etc/postfix-maps
+    environment:
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"   # hit the API directly, bypassing nginx
+
+  frontend:
+    build:
+      target: dev
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3000"]
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules         # keep container's node_modules
+    ports:
+      - "3000:3000"   # Vite dev server with HMR
+
+  # Local mail catcher — Postfix relays to this instead of the internet in dev.
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "8025:8025"   # web UI
+      - "1025:1025"   # SMTP sink
+    networks:
+      - mail
+      - internal

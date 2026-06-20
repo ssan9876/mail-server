@@ -1,0 +1,91 @@
+# ============================================================================
+# Postfix main.cf — virtual mailbox MTA backed by PostgreSQL.
+#
+# Host-specific values (myhostname, TLS cert paths) are set at container start
+# by entrypoint.sh via `postconf -e`. Everything else is static here.
+# ============================================================================
+
+# --- Identity --------------------------------------------------------------
+# myhostname is overridden at runtime from $MAIL_HOSTNAME.
+myhostname = mail.example.com
+myorigin = $myhostname
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+compatibility_level = 3.6
+
+# We deliver everything via the virtual transport; nothing is "local".
+mydestination =
+local_recipient_maps =
+local_transport = error:local mail delivery is disabled
+
+# Trust only loopback. Authenticated clients relay via SASL (see master.cf);
+# inbound port-25 mail is constrained by reject_unauth_destination.
+mynetworks = 127.0.0.0/8 [::1]/128
+inet_interfaces = all
+inet_protocols = ipv4
+
+# --- Logging to stdout (container-friendly) --------------------------------
+maillog_file = /dev/stdout
+
+# --- Size / limits ---------------------------------------------------------
+message_size_limit = 52428800        # 50 MB
+mailbox_size_limit = 0               # quota enforced by Dovecot, not Postfix
+
+# --- Virtual domains / mailboxes / aliases (PostgreSQL) --------------------
+virtual_mailbox_domains = pgsql:/etc/postfix/pgsql/virtual_mailbox_domains.cf
+virtual_mailbox_maps    = pgsql:/etc/postfix/pgsql/virtual_mailbox_maps.cf
+
+# Alias resolution order matters:
+#   1. specific aliases (user@domain -> destinations)
+#   2. mailbox self-map  (real mailbox -> itself; shields it from the catch-all)
+#   3. catch-all         (@domain -> destinations) for everything else
+virtual_alias_maps =
+    pgsql:/etc/postfix/pgsql/virtual_alias_maps.cf
+    pgsql:/etc/postfix/pgsql/virtual_mailbox_self.cf
+    pgsql:/etc/postfix/pgsql/virtual_alias_catchall.cf
+
+# Hand accepted mail to Dovecot over LMTP for Maildir delivery + quota.
+virtual_transport = lmtp:inet:dovecot:24
+
+# --- SASL (authenticate submission against Dovecot) ------------------------
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = inet:dovecot:12345
+smtpd_sasl_auth_enable = no          # enabled per-service in master.cf (587/465)
+smtpd_sasl_security_options = noanonymous
+smtpd_sasl_local_domain = $myhostname
+broken_sasl_auth_clients = yes
+
+# --- TLS (paths set at runtime) --------------------------------------------
+smtpd_tls_security_level = may
+smtpd_tls_cert_file = /etc/postfix/tls/snakeoil.pem
+smtpd_tls_key_file = /etc/postfix/tls/snakeoil.key
+smtpd_tls_protocols = >=TLSv1.2
+smtpd_tls_mandatory_protocols = >=TLSv1.2
+smtpd_tls_loglevel = 1
+smtpd_tls_received_header = yes
+tls_preempt_cipherlist = yes
+
+smtp_tls_security_level = may
+smtp_tls_protocols = >=TLSv1.2
+smtp_tls_loglevel = 1
+
+# --- Anti-relay restrictions -----------------------------------------------
+smtpd_helo_required = yes
+smtpd_relay_restrictions =
+    permit_mynetworks
+    permit_sasl_authenticated
+    reject_unauth_destination
+smtpd_recipient_restrictions =
+    permit_mynetworks
+    permit_sasl_authenticated
+    reject_unauth_destination
+    reject_invalid_helo_hostname
+    reject_non_fqdn_recipient
+    reject_unknown_recipient_domain
+
+# --- Rspamd milter (DKIM signing + spam scoring) ---------------------------
+milter_default_action = accept
+milter_protocol = 6
+smtpd_milters = inet:rspamd:11332
+non_smtpd_milters = inet:rspamd:11332

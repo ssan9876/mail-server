@@ -1,0 +1,232 @@
+# ============================================================================
+# mail-server — production Docker Compose stack
+#
+#   make up        # build + start everything
+#   make logs      # tail logs
+#   make down      # stop
+#
+# Dev overrides live in docker-compose.override.yml (auto-merged by compose).
+# ============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # --------------------------------------------------------------------------
+  # PostgreSQL — single source of truth for domains, mailboxes, aliases, auth.
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Consumed by the init script to provision the read-only mail role.
+      POSTGRES_MAIL_USER: ${POSTGRES_MAIL_USER}
+      POSTGRES_MAIL_PASSWORD: ${POSTGRES_MAIL_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+    logging: *default-logging
+
+  # --------------------------------------------------------------------------
+  # Redis — rate limiting, JWT refresh/blacklist, ephemeral caches.
+  # --------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+    logging: *default-logging
+
+  # --------------------------------------------------------------------------
+  # Backend — FastAPI control plane (REST API, JWT, DNS automation).
+  # --------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - dkim_keys:/dkim
+      - postfix_maps:/etc/postfix-maps
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+    logging: *default-logging
+
+  # --------------------------------------------------------------------------
+  # Frontend — React SPA built to static assets, served by its own nginx.
+  # (Public edge nginx proxies to it; kept separate for clean caching.)
+  # --------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api/v1
+    restart: unless-stopped
+    networks:
+      - internal
+    logging: *default-logging
+
+  # --------------------------------------------------------------------------
+  # Postfix — SMTP MTA. Inbound (25) + submission (465/587). Virtual mailbox
+  # delivery via Dovecot LMTP; pgsql lookup maps; Rspamd milter for DKIM/spam.
+  # --------------------------------------------------------------------------
+  postfix:
+    build:
+      context: ./docker/postfix
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    hostname: ${MAIL_HOSTNAME}
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "25:25"
+      - "465:465"
+      - "587:587"
+    volumes:
+      - maildata:/maildata
+      - dkim_keys:/dkim:ro
+      - certs:/etc/letsencrypt:ro
+      - postfix_maps:/etc/postfix-maps:ro
+    networks:
+      - internal
+      - mail
+    logging: *default-logging
+
+  # --------------------------------------------------------------------------
+  # Dovecot — IMAP/POP3 + LMTP delivery + SQL auth + Maildir storage.
+  # --------------------------------------------------------------------------
+  dovecot:
+    build:
+      context: ./docker/dovecot
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    hostname: ${MAIL_HOSTNAME}
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "143:143"
+      - "993:993"
+    volumes:
+      - maildata:/maildata
+      - certs:/etc/letsencrypt:ro
+    networks:
+      - internal
+      - mail
+    logging: *default-logging
+
+  # --------------------------------------------------------------------------
+  # Rspamd — spam filtering + DKIM signing milter for Postfix.
+  # --------------------------------------------------------------------------
+  rspamd:
+    build:
+      context: ./docker/rspamd
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - dkim_keys:/dkim:ro
+      - rspamd_data:/var/lib/rspamd
+    networks:
+      - mail
+      - internal
+    logging: *default-logging
+
+  # --------------------------------------------------------------------------
+  # Nginx — public edge. TLS termination, reverse proxy for API + SPA,
+  # HTTP rate limiting, ACME http-01 challenge serving.
+  # --------------------------------------------------------------------------
+  nginx:
+    build:
+      context: ./docker/nginx
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - certs:/etc/letsencrypt
+      - acme_challenge:/var/www/acme
+    networks:
+      - internal
+    logging: *default-logging
+
+  # --------------------------------------------------------------------------
+  # Certbot — Let's Encrypt issuance + auto-renewal (runs, sleeps, repeats).
+  # --------------------------------------------------------------------------
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    entrypoint: >
+      sh -c 'trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/acme --quiet;
+        sleep 12h & wait $${!};
+      done'
+    volumes:
+      - certs:/etc/letsencrypt
+      - acme_challenge:/var/www/acme
+    networks:
+      - internal
+    logging: *default-logging
+
+networks:
+  # Control-plane + datastores. Not exposed to the public mail flow.
+  internal:
+    driver: bridge
+  # Mail transport plane (postfix <-> dovecot <-> rspamd).
+  mail:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  maildata:        # Maildir++ store, shared by postfix (write) + dovecot (read/write)
+  dkim_keys:       # DKIM private/public keys, written by backend
+  postfix_maps:    # generated pgsql map config snippets
+  certs:           # Let's Encrypt certificates
+  acme_challenge:  # ACME http-01 webroot
+  rspamd_data:
