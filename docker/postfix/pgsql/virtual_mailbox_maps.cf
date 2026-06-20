@@ -1,0 +1,6 @@
+# Does this mailbox exist? Returns the Maildir path (informational under LMTP).
+hosts = ${POSTGRES_HOST}
+user = ${POSTGRES_MAIL_USER}
+password = ${POSTGRES_MAIL_PASSWORD}
+dbname = ${POSTGRES_DB}
+query = SELECT m.maildir_path FROM mailboxes m JOIN domains d ON m.domain_id = d.id WHERE m.local_part='%u' AND d.name='%d' AND m.is_active=true AND d.is_active=true

@@ -1,0 +1,16 @@
+# Port 80: serve ACME http-01 challenges over plain HTTP; redirect all else to
+# HTTPS. Covers both the web UI host and the mail host (for cert issuance).
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${WEB_HOSTNAME} ${MAIL_HOSTNAME};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/acme;
+        default_type "text/plain";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}

@@ -1,0 +1,30 @@
+# ============================================================================
+# Dovecot SQL queries (template — ${...} substituted at startup).
+#
+#   %n = local part, %d = domain, %u = full address.
+#
+# The password hash carries an inline {ARGON2ID} scheme prefix, so Dovecot
+# auto-detects the scheme; no default_pass_scheme is needed.
+# ============================================================================
+driver = pgsql
+connect = host=${POSTGRES_HOST} dbname=${POSTGRES_DB} user=${POSTGRES_MAIL_USER} password=${POSTGRES_MAIL_PASSWORD}
+
+password_query = \
+  SELECT m.local_part || '@' || d.name AS user, m.password_hash AS password \
+  FROM mailboxes m JOIN domains d ON m.domain_id = d.id \
+  WHERE m.local_part = '%n' AND d.name = '%d' \
+    AND m.is_active = true AND d.is_active = true
+
+user_query = \
+  SELECT '/maildata/' || d.name || '/' || m.local_part AS home, \
+         'maildir:/maildata/' || d.name || '/' || m.local_part AS mail, \
+         5000 AS uid, 5000 AS gid, \
+         ('*:bytes=' || (m.quota_mb * 1048576)) AS quota_rule \
+  FROM mailboxes m JOIN domains d ON m.domain_id = d.id \
+  WHERE m.local_part = '%n' AND d.name = '%d' \
+    AND m.is_active = true AND d.is_active = true
+
+iterate_query = \
+  SELECT m.local_part || '@' || d.name AS user \
+  FROM mailboxes m JOIN domains d ON m.domain_id = d.id \
+  WHERE m.is_active = true AND d.is_active = true

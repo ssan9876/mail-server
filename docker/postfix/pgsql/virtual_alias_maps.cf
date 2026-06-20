@@ -1,0 +1,6 @@
+# Specific aliases: user@domain -> destination(s) (comma-separated).
+hosts = ${POSTGRES_HOST}
+user = ${POSTGRES_MAIL_USER}
+password = ${POSTGRES_MAIL_PASSWORD}
+dbname = ${POSTGRES_DB}
+query = SELECT a.destination FROM aliases a JOIN domains d ON a.domain_id = d.id WHERE a.local_part='%u' AND d.name='%d' AND a.is_active=true AND d.is_active=true

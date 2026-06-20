@@ -1,0 +1,11 @@
+# SQL passdb + userdb. Connection + queries are in dovecot-sql.conf.ext
+# (rendered from a template at startup with the read-only lookup role).
+passdb {
+  driver = sql
+  args = /etc/dovecot/dovecot-sql.conf.ext
+}
+
+userdb {
+  driver = sql
+  args = /etc/dovecot/dovecot-sql.conf.ext
+}
