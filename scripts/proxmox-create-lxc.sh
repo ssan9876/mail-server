@@ -107,7 +107,10 @@ ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
 
 # --- Secret generation (on the host; pushed into the container) -------------
-rand_alnum() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "${1:-32}"; }
+# Note: avoid `tr </dev/urandom | head` — head closing the pipe sends SIGPIPE
+# to tr, which under `set -o pipefail` aborts the script. Source finite bytes
+# from openssl and trim with cut (which consumes all input) instead.
+rand_alnum() { local n="${1:-32}"; openssl rand -base64 "$(( n * 2 ))" | tr -dc 'A-Za-z0-9' | cut -c "1-${n}"; }
 fernet_key() { openssl rand -base64 32 | tr '+/' '-_'; }  # valid Fernet key
 POSTGRES_PASSWORD="$(rand_alnum 32)"
 POSTGRES_MAIL_PASSWORD="$(rand_alnum 32)"
@@ -148,6 +151,17 @@ pct create "$CTID" "${TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
   --onboot 1 \
   --ostype ubuntu
 ok "Container ${CTID} created."
+
+# Docker-in-LXC needs the container to be AppArmor-unconfined and to have
+# device/cgroup access; nesting/keyctl alone aren't enough (image build RUN
+# steps fail with "unable to apply apparmor profile" otherwise).
+info "Enabling Docker-in-LXC (AppArmor unconfined + device access)…"
+cat >> "/etc/pve/lxc/${CTID}.conf" <<'LXCCONF'
+lxc.apparmor.profile: unconfined
+lxc.cgroup2.devices.allow: a
+lxc.cap.drop:
+lxc.mount.auto: proc:rw sys:rw
+LXCCONF
 
 info "Starting container…"
 pct start "$CTID"
@@ -240,6 +254,12 @@ EOF
 pct push "$CTID" "$ENV_TMP" /opt/mail-server/.env --perms 600
 rm -f "$ENV_TMP"; trap 'rm -f "$ENV_TMP"' EXIT
 ok ".env written."
+
+# The Ubuntu template ships Postfix listening on :25, which collides with the
+# Dockerized Postfix. Disable it so the container's port 25 is free.
+info "Freeing port 25 (disabling the template's built-in Postfix)…"
+pct exec "$CTID" -- bash -c \
+  "systemctl disable --now postfix >/dev/null 2>&1 || true; systemctl mask postfix >/dev/null 2>&1 || true"
 
 # --- Build + launch (streamed so failures are visible) ----------------------
 info "Building images and starting the stack (several minutes)…"

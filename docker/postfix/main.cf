@@ -29,8 +29,10 @@ inet_protocols = ipv4
 maillog_file = /dev/stdout
 
 # --- Size / limits ---------------------------------------------------------
-message_size_limit = 52428800        # 50 MB
-mailbox_size_limit = 0               # quota enforced by Dovecot, not Postfix
+# 50 MB
+message_size_limit = 52428800
+# Quota is enforced by Dovecot, not Postfix.
+mailbox_size_limit = 0
 
 # --- Virtual domains / mailboxes / aliases (PostgreSQL) --------------------
 virtual_mailbox_domains = pgsql:/etc/postfix/pgsql/virtual_mailbox_domains.cf
@@ -51,7 +53,8 @@ virtual_transport = lmtp:inet:dovecot:24
 # --- SASL (authenticate submission against Dovecot) ------------------------
 smtpd_sasl_type = dovecot
 smtpd_sasl_path = inet:dovecot:12345
-smtpd_sasl_auth_enable = no          # enabled per-service in master.cf (587/465)
+# Enabled per-service in master.cf (submission 587 / smtps 465).
+smtpd_sasl_auth_enable = no
 smtpd_sasl_security_options = noanonymous
 smtpd_sasl_local_domain = $myhostname
 broken_sasl_auth_clients = yes
