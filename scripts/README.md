@@ -1,0 +1,70 @@
+# Proxmox helper script
+
+`proxmox-create-lxc.sh` provisions the entire mail-server stack into a fresh
+Ubuntu 24.04 LXC container on a Proxmox VE host — create container → install
+Docker → clone repo → generate secrets → launch.
+
+## Usage
+
+Run **on the Proxmox host, as root**. One-liner:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/ssan9876/mail-server/main/scripts/proxmox-create-lxc.sh)"
+```
+
+…or copy the script over and run it. It prompts for the three required values
+(mail FQDN, dashboard hostname, admin email) when run interactively, or take
+them from the environment for a non-interactive run:
+
+```bash
+MAIL_HOSTNAME=mail.example.com \
+WEB_HOSTNAME=admin.example.com \
+ADMIN_EMAIL=admin@example.com \
+bash proxmox-create-lxc.sh
+```
+
+> Until PR #1 is merged to `main`, set `REPO_BRANCH=build/mail-server-platform`
+> (and use that branch's raw URL in the one-liner above).
+
+## What it does
+
+1. Creates an LXC (defaults: 2 cores, 4 GB RAM, 16 GB disk) with
+   `nesting=1,keyctl=1` so Docker runs inside it.
+2. Installs Docker + the Compose plugin.
+3. Clones the repo to `/opt/mail-server`.
+4. Generates a `.env` with strong random secrets (DB/Redis/Rspamd passwords,
+   JWT secret, a valid Fernet `SECRETS_ENCRYPTION_KEY`) and a random admin
+   password (printed once at the end).
+5. Builds and starts the stack with `docker compose`.
+
+## Configuration (environment variables)
+
+| Var | Default | Notes |
+|---|---|---|
+| `CTID` | next free id | container id |
+| `CT_HOSTNAME` | `mailserver` | container hostname |
+| `CORES` / `RAM_MB` / `SWAP_MB` / `DISK_GB` | `2` / `4096` / `2048` / `16` | sizing |
+| `STORAGE` | `local-lvm` | rootfs storage |
+| `BRIDGE` | `vmbr0` | network bridge |
+| `NET_IP` | `dhcp` | e.g. `192.168.1.50/24,gw=192.168.1.1` for static |
+| `TEMPLATE_STORAGE` | `local` | where the LXC template lives |
+| `PRIVILEGED` | `1` | `0` for an unprivileged container (PVE 8+) |
+| `REPO_URL` / `REPO_BRANCH` | this repo / `main` | source to deploy |
+| `CLOUDFLARE_API_TOKEN` | empty | optional; enables DNS automation |
+| `ADMIN_PASSWORD` | random | set to choose your own |
+
+## After it runs
+
+The script prints the container IP, dashboard URL, and admin credentials, then
+the remaining manual steps: point DNS (A/MX/PTR) at the container, issue TLS
+certs (`pct exec <CTID> -- bash -c 'cd /opt/mail-server && make certs'`), and add
+domains/mailboxes in the dashboard. See [../docs/deployment.md](../docs/deployment.md).
+
+## Notes
+
+- **Privileged by default** for the most reliable Docker-in-LXC and mail
+  networking. Set `PRIVILEGED=0` for stronger isolation on Proxmox VE 8+; if
+  Docker's overlay2 storage misbehaves in an unprivileged container, fall back
+  to privileged.
+- Running a public mail server still requires outbound port 25 open and a PTR
+  record — neither of which this script can do for you.
