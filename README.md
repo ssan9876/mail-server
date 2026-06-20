@@ -4,8 +4,6 @@ A self-hosted, multi-domain email platform — a lightweight, open alternative t
 Google Workspace / Microsoft 365. SMTP + IMAP, virtual mailboxes, aliases,
 catch-all, DKIM/SPF/DMARC, a REST API, and admin/user dashboards.
 
-> **Status:** under active incremental construction. Step 1 (deployment
-> skeleton) is complete; mail services and the API are wired up in later steps.
 
 ## Stack
 
