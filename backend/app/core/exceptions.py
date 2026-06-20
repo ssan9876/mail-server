@@ -48,6 +48,13 @@ class RateLimitError(AppError):
     code = "rate_limited"
 
 
+class ExternalServiceError(AppError):
+    """An upstream dependency (e.g. Cloudflare) failed."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    code = "external_service_error"
+
+
 def _error_body(code: str, message: str) -> dict:
     return {"error": {"code": code, "message": message}}
 

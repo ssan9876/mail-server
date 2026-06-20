@@ -149,6 +149,24 @@ async def test_publish_dns_calls_cloudflare(client, app):
 
 
 @pytest.mark.usefixtures("superadmin")
+async def test_publish_dns_surfaces_cloudflare_error_as_502(client, app):
+    from tests.conftest import ADMIN_EMAIL, ADMIN_PASSWORD
+    from app.services.dns_service import CloudflareError
+
+    class FailingCloudflare:
+        async def publish_records(self, domain_name, records):
+            raise CloudflareError("managed by Email Routing")
+
+    app.dependency_overrides[get_cloudflare_client] = lambda: FailingCloudflare()
+
+    headers = await login_headers(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+    created = (await client.post(DOMAINS, json={"name": "cferr.com"}, headers=headers)).json()
+    resp = await client.post(f"{DOMAINS}/{created['id']}/dns/publish", headers=headers)
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "external_service_error"
+
+
+@pytest.mark.usefixtures("superadmin")
 async def test_verify_dns_updates_flags(client, app):
     from tests.conftest import ADMIN_EMAIL, ADMIN_PASSWORD
 

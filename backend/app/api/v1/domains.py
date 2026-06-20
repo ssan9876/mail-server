@@ -22,8 +22,9 @@ from app.schemas.domain import (
     DomainUpdate,
     VerificationResult,
 )
+from app.core.exceptions import ExternalServiceError
 from app.services import audit_service, dkim_export_service, domain_service
-from app.services.dns_service import CloudflareClient
+from app.services.dns_service import CloudflareClient, CloudflareError
 from app.services.dns_verify_service import DnsResolver
 
 # Every route requires an admin (superadmin or domain_admin).
@@ -141,7 +142,11 @@ async def publish_dns(
     """Push the desired records to Cloudflare for the domain's zone."""
     domain = await domain_service.get_domain(db, current_user, domain_id)
     records = domain_service.desired_records(domain)
-    await cloudflare.publish_records(domain.name, records)
+    try:
+        await cloudflare.publish_records(domain.name, records)
+    except CloudflareError as exc:
+        # Surface a clean 502 with Cloudflare's message instead of a raw 500.
+        raise ExternalServiceError(f"Cloudflare publish failed: {exc}") from exc
     await audit_service.record(
         db,
         action="domain.dns_published",
