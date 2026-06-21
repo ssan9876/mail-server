@@ -47,6 +47,28 @@ else
     postconf -e "smtpd_tls_key_file=/etc/postfix/tls/snakeoil.key"
 fi
 
+# Optional outbound SMTP relay (smarthost). When RELAYHOST is set, Postfix sends
+# all outbound mail through it instead of delivering directly on port 25 — the
+# way to send from a host whose port 25 is blocked (home/NAT, some clouds).
+#   RELAYHOST          e.g. [smtp-relay.brevo.com]:587   (brackets skip MX lookup)
+#   RELAY_USERNAME     relay account user
+#   RELAY_PASSWORD     relay account password / API key
+if [ -n "${RELAYHOST:-}" ]; then
+    echo "[postfix] configuring outbound relay via ${RELAYHOST}"
+    postconf -e "relayhost=${RELAYHOST}"
+    if [ -n "${RELAY_USERNAME:-}" ]; then
+        printf '%s %s:%s\n' "${RELAYHOST}" "${RELAY_USERNAME}" "${RELAY_PASSWORD}" \
+            > /etc/postfix/sasl_passwd
+        postmap hash:/etc/postfix/sasl_passwd
+        chmod 600 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
+        postconf -e "smtp_sasl_auth_enable=yes"
+        postconf -e "smtp_sasl_password_maps=hash:/etc/postfix/sasl_passwd"
+        postconf -e "smtp_sasl_security_options=noanonymous"
+        postconf -e "smtp_sasl_tls_security_options=noanonymous"
+        postconf -e "smtp_tls_security_level=encrypt"
+    fi
+fi
+
 echo "[postfix] waiting for PostgreSQL at ${POSTGRES_HOST}:${POSTGRES_PORT}"
 until (echo > "/dev/tcp/${POSTGRES_HOST}/${POSTGRES_PORT}") 2>/dev/null; do
     sleep 1
