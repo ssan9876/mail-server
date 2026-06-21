@@ -51,7 +51,16 @@ catch-all are resolved by `virtual_alias_*` maps.
 
 **Outbound:** authenticated client → Postfix submission (587/465, SASL via
 Dovecot) → Rspamd milter **DKIM-signs** using the domain's key → delivered to
-the remote MTA.
+the remote MTA, **or** handed to an SMTP **relay/smarthost** when `RELAYHOST`
+is set (the way to send where port 25 is blocked).
+
+**Webmail:** Roundcube (optional, published on `:8080`) talks IMAP/SMTP over
+STARTTLS to Dovecot/Postfix on the internal network — a browser front-end to
+the same mailboxes. Expose it via the edge proxy or a tunnel.
+
+For running without a public IP (home/Proxmox), inbound is delegated to
+Cloudflare Email Routing and the HTTP UIs are exposed via a Cloudflare Tunnel —
+see [hybrid-deployment.md](hybrid-deployment.md).
 
 ## Authentication
 

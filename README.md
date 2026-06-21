@@ -13,9 +13,10 @@ catch-all, DKIM/SPF/DMARC, a REST API, and admin/user dashboards.
 | Frontend         | React + TypeScript (Vite)           |
 | Database         | PostgreSQL 16                        |
 | Cache / limits   | Redis 7                             |
-| MTA (SMTP)       | Postfix + `postfix-pgsql`           |
+| MTA (SMTP)       | Postfix + `postfix-pgsql` (+ optional relay) |
 | MDA (IMAP/POP3)  | Dovecot + `dovecot-pgsql`, Maildir  |
 | Spam / DKIM      | Rspamd (milter)                     |
+| Webmail          | Roundcube                           |
 | Edge / TLS       | Nginx + Certbot (Let's Encrypt)     |
 | DNS automation   | Cloudflare API                      |
 | Deployment       | Docker Compose (Ubuntu 24.04 hosts) |
@@ -49,14 +50,27 @@ Key dev endpoints:
 | http://localhost:3000    | Frontend (Vite dev server)        |
 | http://localhost:8025    | Mailpit — captured outbound mail  |
 
-## Production
+## Deployment options
+
+| Path | Best for | Inbound | Outbound | Guide |
+|------|----------|---------|----------|-------|
+| **VPS (recommended)** | A real, independent mail server | Direct to Postfix (your MX + PTR) | Direct on :25, or via relay | [docs/deployment.md](docs/deployment.md), [docs/vps-install.md](docs/vps-install.md) |
+| **Home / Proxmox (hybrid)** | Home lab, no public IP / blocked :25 | Cloudflare Email Routing (forwarding) | SMTP relay (smarthost) | [docs/hybrid-deployment.md](docs/hybrid-deployment.md) |
 
 ```bash
 docker compose -f docker-compose.yml up -d --build   # or: make prod-up
 ```
 
-See [docs/deployment.md](docs/deployment.md) for DNS records (MX, SPF, DKIM,
-DMARC, PTR), firewall rules, and TLS setup.
+- **VPS:** one-command installer in [docs/vps-install.md](docs/vps-install.md);
+  full runbook (MX/SPF/DKIM/DMARC/PTR, firewall, TLS) in
+  [docs/deployment.md](docs/deployment.md).
+- **Proxmox LXC:** auto-provisioner at
+  [scripts/proxmox-create-lxc.sh](scripts/proxmox-create-lxc.sh).
+- **Home/hybrid (no public MX):** [docs/hybrid-deployment.md](docs/hybrid-deployment.md)
+  — Cloudflare Email Routing + SMTP relay + Cloudflare Tunnel + Roundcube.
+
+Webmail (Roundcube) is published on `:8080`; expose it via your reverse proxy or
+tunnel. Mailbox users sign in with their **full email address**.
 
 ## Build roadmap
 
