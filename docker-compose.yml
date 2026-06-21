@@ -172,6 +172,34 @@ services:
     logging: *default-logging
 
   # --------------------------------------------------------------------------
+  # Roundcube — browser webmail. Talks IMAP/SMTP (STARTTLS) to Dovecot/Postfix
+  # over the internal network. Published on :8080 for a reverse proxy / tunnel.
+  # --------------------------------------------------------------------------
+  webmail:
+    image: roundcube/roundcubemail:latest-apache
+    restart: unless-stopped
+    depends_on:
+      - dovecot
+      - postfix
+    environment:
+      ROUNDCUBEMAIL_DB_TYPE: sqlite
+      ROUNDCUBEMAIL_DEFAULT_HOST: tls://dovecot
+      ROUNDCUBEMAIL_DEFAULT_PORT: "143"
+      ROUNDCUBEMAIL_SMTP_SERVER: tls://postfix
+      ROUNDCUBEMAIL_SMTP_PORT: "587"
+      ROUNDCUBEMAIL_PLUGINS: "archive,zipdownload"
+      ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: 25M
+    volumes:
+      - roundcube_db:/var/roundcube/db
+      # Extra config: trust the internal self-signed TLS (see file).
+      - ./docker/roundcube/custom.inc.php:/var/roundcube/config/custom.inc.php:ro
+    ports:
+      - "8080:80"
+    networks:
+      - internal
+    logging: *default-logging
+
+  # --------------------------------------------------------------------------
   # Nginx — public edge. TLS termination, reverse proxy for API + SPA,
   # HTTP rate limiting, ACME http-01 challenge serving.
   # --------------------------------------------------------------------------
@@ -230,3 +258,4 @@ volumes:
   certs:           # Let's Encrypt certificates
   acme_challenge:  # ACME http-01 webroot
   rspamd_data:
+  roundcube_db:    # Roundcube SQLite DB (prefs, contacts)
