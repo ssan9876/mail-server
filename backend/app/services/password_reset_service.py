@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dovecot_password import hash_for_dovecot
@@ -28,6 +28,17 @@ async def request_reset(db: AsyncSession, email: str) -> str | None:
     mailbox = await mailbox_service.get_by_address(db, email)
     if mailbox is None:
         return None
+
+    # Only the newest token stays valid: retire any outstanding unused tokens
+    # so repeated requests don't accumulate multiple live reset links.
+    await db.execute(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.mailbox_id == mailbox.id,
+            PasswordResetToken.used.is_(False),
+        )
+        .values(used=True)
+    )
 
     raw_token = generate_opaque_token()
     db.add(

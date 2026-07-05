@@ -28,10 +28,9 @@ async def get_redis(request: Request) -> aioredis.Redis:
 
 def get_client_ip(request: Request) -> str | None:
     """Best-effort client IP, honoring the edge proxy's X-Forwarded-For."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else None
+    from app.core.client_ip import client_ip
+
+    return client_ip(request)
 
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]

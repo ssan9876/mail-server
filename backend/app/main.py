@@ -43,11 +43,14 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Interactive docs + schema are development conveniences; in production
+    # they only hand an attacker a complete map of the API surface.
     app = FastAPI(
         title="mail-server API",
         version="0.1.0",
-        docs_url="/docs",
-        openapi_url="/openapi.json",
+        docs_url=None if settings.is_production else "/docs",
+        redoc_url=None if settings.is_production else "/redoc",
+        openapi_url=None if settings.is_production else "/openapi.json",
         lifespan=lifespan,
     )
 

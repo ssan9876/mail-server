@@ -18,6 +18,7 @@ from app.core import crypto
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.domain import Domain
 from app.models.enums import UserRole
+from app.models.mailbox import Mailbox
 from app.models.user import User
 from app.schemas.domain import DnsRecord, VerificationResult
 from app.services import dkim_service, dns_service, dns_verify_service
@@ -95,6 +96,12 @@ async def update_domain(
     if is_active is not None:
         domain.is_active = is_active
     if catch_all_box is not None:
+        # The catch-all target must be a mailbox of THIS domain — otherwise a
+        # domain admin could point their catch-all at (and probe the ids of)
+        # mailboxes in domains they don't control.
+        target = await db.get(Mailbox, catch_all_box)
+        if target is None or target.domain_id != domain.id:
+            raise NotFoundError("Catch-all mailbox not found in this domain.")
         domain.catch_all_box = catch_all_box
     await db.commit()
     await db.refresh(domain)

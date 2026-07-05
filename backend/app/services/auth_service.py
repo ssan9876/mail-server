@@ -21,6 +21,7 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    hash_password,
     verify_password,
 )
 from app.core.exceptions import AuthenticationError, RateLimitError
@@ -32,6 +33,11 @@ _REFRESH_PREFIX = "refresh:"
 _BLACKLIST_PREFIX = "bl:"
 _LOGINFAIL_PREFIX = "loginfail:"
 _LOCKOUT_WINDOW_SECONDS = 900  # 15 minutes
+
+# Verified against when no account matches the email, so a login attempt costs
+# the same Argon2 work whether or not the address is registered (no
+# account-enumeration via response timing).
+_DUMMY_HASH = hash_password("timing-equalizer-dummy-password")
 
 
 # --------------------------------------------------------------------------- #
@@ -45,9 +51,11 @@ async def _assert_not_locked(redis: aioredis.Redis, email: str) -> None:
 
 async def _record_failure(redis: aioredis.Redis, email: str) -> None:
     key = f"{_LOGINFAIL_PREFIX}{email}"
-    count = await redis.incr(key)
-    if count == 1:
-        await redis.expire(key, _LOCKOUT_WINDOW_SECONDS)
+    await redis.incr(key)
+    # Always (re)apply the TTL: if the process died between INCR and EXPIRE on
+    # the first failure, the counter would otherwise never expire and lock the
+    # account out permanently.
+    await redis.expire(key, _LOCKOUT_WINDOW_SECONDS)
 
 
 async def _clear_failures(redis: aioredis.Redis, email: str) -> None:
@@ -88,8 +96,12 @@ async def authenticate(
     await _assert_not_locked(redis, email)
 
     user = await user_service.get_by_email(db, email)
-    # Always run a hash comparison to keep timing uniform for unknown emails.
-    valid = bool(user) and user.is_active and verify_password(password, user.password_hash)
+    if user is None:
+        # Burn the same Argon2 work as a real verification (timing uniformity).
+        verify_password(password, _DUMMY_HASH)
+        valid = False
+    else:
+        valid = user.is_active and verify_password(password, user.password_hash)
     if not valid:
         await _record_failure(redis, email)
         raise AuthenticationError("Invalid email or password.")

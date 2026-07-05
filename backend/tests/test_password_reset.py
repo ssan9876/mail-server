@@ -54,6 +54,19 @@ async def test_token_is_single_use(client):
     assert replay.status_code == 401
 
 
+@pytest.mark.usefixtures("superadmin")
+async def test_new_request_invalidates_previous_token(client):
+    await _setup_mailbox(client)
+    first = (await client.post(REQUEST, json={"email": "alice@reset.com"})).json()["debug_token"]
+    second = (await client.post(REQUEST, json={"email": "alice@reset.com"})).json()["debug_token"]
+
+    # Only the most recently issued token may be redeemed.
+    stale = await client.post(CONFIRM, json={"token": first, "new_password": "newpassword22"})
+    assert stale.status_code == 401
+    fresh = await client.post(CONFIRM, json={"token": second, "new_password": "newpassword22"})
+    assert fresh.status_code == 200
+
+
 async def test_unknown_email_does_not_enumerate(client):
     resp = await client.post(REQUEST, json={"email": "nobody@nowhere.com"})
     assert resp.status_code == 200
