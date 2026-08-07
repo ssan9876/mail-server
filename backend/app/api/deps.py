@@ -101,7 +101,7 @@ async def require_service_token(
     from app.services import idm_token_service
 
     if credentials is None:
-        raise PermissionDeniedError("Service token required.")
+        raise AuthenticationError("Service token required.")
     return await idm_token_service.verify_token(db, credentials.credentials)
 
 

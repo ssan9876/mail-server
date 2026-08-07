@@ -31,7 +31,7 @@ class IdmServiceToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     token_hash: Mapped[str] = mapped_column(
         String(64), unique=True, nullable=False, index=True
     )
-    # First 8 chars of the raw token — identifies a token in the UI and in logs
+    # First 16 chars of the raw token — identifies a token in the UI and in logs
     # without being usable to authenticate.
     prefix: Mapped[str] = mapped_column(String(16), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

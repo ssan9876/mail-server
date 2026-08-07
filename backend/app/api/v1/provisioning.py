@@ -1,7 +1,9 @@
 """IdM provisioning endpoints (service-token authenticated).
 
-These routes are blocked at the Nginx edge and are reachable only on the
-internal Docker network — see docker/nginx/templates/10-https.conf.template.
+The service token is the enforcing control today. A later task adds an edge
+block in docker/nginx/templates/10-https.conf.template so these routes are
+only reachable on the internal Docker network; until then, do not assume
+network-level protection here.
 """
 from __future__ import annotations
 

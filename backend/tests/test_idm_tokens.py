@@ -36,7 +36,7 @@ async def test_verify_accepts_the_raw_token(sessionmaker_):
 @pytest.mark.asyncio
 async def test_verify_rejects_unknown_revoked_and_expired(sessionmaker_):
     async with sessionmaker_() as session:
-        with pytest.raises(PermissionDeniedError):
+        with pytest.raises(PermissionDeniedError) as unknown_exc:
             await idm_token_service.verify_token(session, "idm_nope")
 
     async with sessionmaker_() as session:
@@ -53,10 +53,20 @@ async def test_verify_rejects_unknown_revoked_and_expired(sessionmaker_):
         )
 
     async with sessionmaker_() as session:
-        with pytest.raises(PermissionDeniedError):
+        with pytest.raises(PermissionDeniedError) as revoked_exc:
             await idm_token_service.verify_token(session, revoked_raw)
-        with pytest.raises(PermissionDeniedError):
+        with pytest.raises(PermissionDeniedError) as expired_exc:
             await idm_token_service.verify_token(session, expired_raw)
+
+    # A caller must not be able to distinguish unknown/revoked/expired by message or code.
+    messages = {
+        unknown_exc.value.message,
+        revoked_exc.value.message,
+        expired_exc.value.message,
+    }
+    assert messages == {"Invalid service token."}
+    codes = {unknown_exc.value.code, revoked_exc.value.code, expired_exc.value.code}
+    assert codes == {"permission_denied"}
 
 
 @pytest.mark.asyncio
@@ -96,6 +106,14 @@ async def test_operator_jwt_is_not_a_service_token(client, superadmin):
     headers = await login_headers(client, ADMIN_EMAIL, ADMIN_PASSWORD)
     resp = await client.get("/api/v1/provisioning/health", headers=headers)
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_provisioning_health_requires_a_credential(client):
+    """No Authorization header at all is 401, not 403 — matching the JWT path."""
+    resp = await client.get("/api/v1/provisioning/health")
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == "Bearer"
 
 
 @pytest.mark.asyncio
