@@ -19,23 +19,76 @@ from app.models.user import User
 from app.services import domain_service
 
 
-def _maildir_path(domain_name: str, local_part: str) -> str:
-    # Maildir++ layout: <root>/<domain>/<local_part>/
+def maildir_path(domain_name: str, local_part: str) -> str:
+    """Maildir++ layout: <root>/<domain>/<local_part>/.
+
+    Assigned once at creation and never recomputed. A rename deliberately keeps
+    the original path so existing mail follows the user — Dovecot and Postfix
+    both read this column rather than deriving the path.
+    """
     return f"{settings.MAILDIR_ROOT.rstrip('/')}/{domain_name}/{local_part}/"
 
 
-async def _local_part_taken(db: AsyncSession, domain_id: uuid.UUID, local_part: str) -> bool:
-    mb = await db.execute(
-        select(Mailbox.id).where(
-            Mailbox.domain_id == domain_id, Mailbox.local_part == local_part
-        )
+async def local_part_taken(
+    db: AsyncSession,
+    domain_id: uuid.UUID,
+    local_part: str,
+    *,
+    exclude_mailbox_id: uuid.UUID | None = None,
+) -> bool:
+    """Whether `local_part@domain` is claimed by a mailbox or an alias.
+
+    `exclude_mailbox_id` lets a rename ignore the row being renamed, which
+    would otherwise always collide with itself.
+    """
+    mailbox_stmt = select(Mailbox.id).where(
+        Mailbox.domain_id == domain_id, Mailbox.local_part == local_part
     )
+    if exclude_mailbox_id is not None:
+        mailbox_stmt = mailbox_stmt.where(Mailbox.id != exclude_mailbox_id)
+    mb = await db.execute(mailbox_stmt)
     if mb.first():
         return True
+
     al = await db.execute(
         select(Alias.id).where(Alias.domain_id == domain_id, Alias.local_part == local_part)
     )
     return al.first() is not None
+
+
+async def create_mailbox_unscoped(
+    db: AsyncSession,
+    domain: Domain,
+    *,
+    local_part: str,
+    password_hash: str,
+    display_name: str | None = None,
+    quota_mb: int | None = None,
+    is_active: bool = True,
+    commit: bool = True,
+) -> Mailbox:
+    """Create a mailbox with no ownership check and a pre-computed hash.
+
+    The caller is responsible for authorization. Used by the admin path (via
+    `create_mailbox`, which checks domain ownership first) and by provisioning,
+    which authenticates a service token instead of a user.
+    """
+    mailbox = Mailbox(
+        domain_id=domain.id,
+        local_part=local_part,
+        password_hash=password_hash,
+        display_name=display_name,
+        quota_mb=quota_mb if quota_mb is not None else settings.DEFAULT_MAILBOX_QUOTA_MB,
+        maildir_path=maildir_path(domain.name, local_part),
+        is_active=is_active,
+    )
+    db.add(mailbox)
+    if commit:
+        await db.commit()
+        await db.refresh(mailbox)
+    else:
+        await db.flush()
+    return mailbox
 
 
 async def list_mailboxes(db: AsyncSession, user: User, domain_id: uuid.UUID) -> list[Mailbox]:
@@ -67,21 +120,17 @@ async def create_mailbox(
 ) -> Mailbox:
     domain: Domain = await domain_service.get_domain(db, user, domain_id)
 
-    if await _local_part_taken(db, domain_id, local_part):
+    if await local_part_taken(db, domain_id, local_part):
         raise ConflictError(f"{local_part}@{domain.name} already exists (mailbox or alias).")
 
-    mailbox = Mailbox(
-        domain_id=domain_id,
+    return await create_mailbox_unscoped(
+        db,
+        domain,
         local_part=local_part,
         password_hash=hash_for_dovecot(password),
         display_name=display_name,
-        quota_mb=quota_mb if quota_mb is not None else settings.DEFAULT_MAILBOX_QUOTA_MB,
-        maildir_path=_maildir_path(domain.name, local_part),
+        quota_mb=quota_mb,
     )
-    db.add(mailbox)
-    await db.commit()
-    await db.refresh(mailbox)
-    return mailbox
 
 
 async def update_mailbox(
