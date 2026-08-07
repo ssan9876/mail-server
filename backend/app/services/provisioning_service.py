@@ -300,6 +300,23 @@ async def _converge_aliases(
     ).all()
     owned = {alias for alias, _ in owned_rows}
 
+    # A rename can promote an owned alias to the primary address (see the
+    # `exclude_alias_ids` exclusion in `_converge_mailbox`), and nothing else
+    # reconciles it away: with `aliases` omitted, the branch below would repoint
+    # it at the new primary and leave an alias whose destination is its own
+    # address. Delivery survives that — `virtual_mailbox_self.cf` terminates
+    # self-mappings — but while the mailbox is DEACTIVATED the alias stays
+    # active and short-circuits `virtual_alias_catchall.cf`, so mail that should
+    # have reached the domain catch-all bounces instead. Drop it here, before
+    # either branch can see it.
+    self_key = (mailbox.domain_id, mailbox.local_part)
+    for alias in [a for a in owned if (a.domain_id, a.local_part) == self_key]:
+        await db.execute(
+            delete(IdmIdentityAlias).where(IdmIdentityAlias.alias_id == alias.id)
+        )
+        await db.delete(alias)
+        owned.discard(alias)
+
     # An omitted collection means "leave untouched" — only the destination is
     # refreshed, so a rename still repoints aliases the IdM already owns. The
     # `is None` arm is unreachable via the schema (an explicit null is a 422);

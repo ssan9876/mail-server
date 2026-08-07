@@ -419,3 +419,50 @@ async def test_alias_clash_with_an_admin_created_alias_says_not_managed(sessionm
                     aliases=["handmade@clashmsg2.example.com"],
                 ),
             )
+
+
+@pytest.mark.asyncio
+async def test_rename_onto_an_owned_alias_leaves_no_self_referential_alias(
+    sessionmaker_,
+):
+    """Promoting an owned alias to the primary address must retire the alias.
+
+    `exclude_alias_ids` makes this rename legal, but nothing else reconciles
+    the alias away: with `aliases` omitted — an ordinary minimal payload — the
+    omitted-collection branch repoints owned aliases at the new primary,
+    leaving an alias whose destination is its own address. Delivery survives
+    that (`virtual_mailbox_self.cf` terminates self-mappings), but while the
+    mailbox is deactivated the still-active alias short-circuits
+    `virtual_alias_catchall.cf` and mail that should have reached the domain
+    catch-all bounces instead.
+    """
+    domain = await _seed_domain(sessionmaker_, "selfref.example.com")
+    async with sessionmaker_() as session:
+        identity = await provisioning_service.upsert_identity(
+            session,
+            "al-15",
+            _payload(
+                "jane@selfref.example.com", aliases=["j.doe@selfref.example.com"]
+            ),
+        )
+        mailbox_id = identity.mailbox_id
+
+    async with sessionmaker_() as session:
+        # `aliases` omitted entirely: the minimal payload a rename really sends.
+        await provisioning_service.upsert_identity(
+            session, "al-15", _payload("j.doe@selfref.example.com")
+        )
+
+    async with sessionmaker_() as session:
+        mailbox = await session.get(Mailbox, mailbox_id)
+        assert mailbox.local_part == "j.doe"
+        assert await _alias_local_parts(session, domain.id) == []
+        links = (await session.execute(select(IdmIdentityAlias))).scalars().all()
+        assert links == [], "the ownership link must go with the alias"
+
+        aliases = (await session.execute(select(Alias))).scalars().all()
+        assert not [
+            a
+            for a in aliases
+            if f"{a.local_part}@selfref.example.com" == a.destination
+        ], "no alias may point at its own address"
