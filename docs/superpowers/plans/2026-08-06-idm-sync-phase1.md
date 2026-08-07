@@ -2698,11 +2698,21 @@ async def test_status_round_trips_through_get(client, svc, status):
 
 @pytest.mark.asyncio
 async def test_provisioning_requires_a_token(client, svc):
+    """No credentials is 401 with a challenge, matching the JWT path; an
+    invalid token is 403. Only the second case must be indistinguishable."""
     resp = await client.put(
         "/api/v1/provisioning/identities/ext-108",
         json={"email": "jane@api.test", "status": "active"},
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 401
+    assert resp.headers.get("WWW-Authenticate") == "Bearer"
+
+    bad = await client.put(
+        "/api/v1/provisioning/identities/ext-108",
+        json={"email": "jane@api.test", "status": "active"},
+        headers={"Authorization": "Bearer idm_not-a-real-token"},
+    )
+    assert bad.status_code == 403
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
