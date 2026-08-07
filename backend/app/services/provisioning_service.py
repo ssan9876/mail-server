@@ -338,21 +338,42 @@ async def _converge_admin(
     to — the same shape the counterpart system's own console requires (a local
     row plus a role grant before authorization works).
 
+    Two separate concerns live here, and conflating them was a real
+    access-revocation hole:
+
+      - `is_active` is derived from `status`, which is MANDATORY on every
+        payload. It therefore tracks the status mapping for any linked user on
+        every push, whether or not `admin` was sent.
+      - Role and domain ownership come from `admin`, which is optional. The
+        absent-collection rule ("a minimal payload cannot wipe what it does not
+        mention") applies to those, and only to those.
+
     Returns the domain ownership reassignments this call performed, each as
     `{"domain": <name>, "from": <previous owner id, or None>}` — Task 8 folds
     this into the audit entry so a silent takeover is never actually silent.
     """
     reassigned_domains: list[dict] = []
 
-    if "admin" not in payload.model_fields_set:
-        return reassigned_domains
-
     user: User | None = (
         await db.get(User, identity.user_id) if identity.user_id is not None else None
     )
 
+    if user is not None:
+        # Offboarding arrives as `{"email": ..., "status": "deactivated"}` with
+        # no `admin` key at all — the IdM has no reason to restate an admin
+        # block for someone who just left. Returning early on an absent `admin`
+        # used to skip this line and leave a departed employee with full
+        # mail-admin access. `status` was present; honour it.
+        user.is_active = STATUS_ACTIVE_MAP[payload.status]
+
+    if "admin" not in payload.model_fields_set:
+        return reassigned_domains
+
     if payload.admin is None:
-        # Deactivate, never delete: audit entries reference this row.
+        # Deactivate, never delete: audit entries reference this row. This
+        # deliberately overrides the status mapping above — an explicit
+        # `"admin": null` means "no longer an operator" regardless of whether
+        # the person is still an active employee.
         if user is not None:
             user.is_active = False
         return reassigned_domains
@@ -385,6 +406,8 @@ async def _converge_admin(
         user.email = email
         user.role = _ADMIN_ROLES[payload.admin.role]
 
+    # Also covers the row just created above, which the status mapping at the
+    # top of this function could not have seen.
     user.is_active = STATUS_ACTIVE_MAP[payload.status]
 
     # Domain ownership is last-write-wins, by deliberate ruling: the IdM is

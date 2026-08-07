@@ -117,6 +117,100 @@ async def test_deactivated_status_also_deactivates_the_admin_record(sessionmaker
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["deactivated", "suspended", "pending"])
+async def test_inactive_status_revokes_operator_access_when_admin_is_omitted(
+    sessionmaker_, status
+):
+    """`is_active` is derived from `status`, never from `admin`.
+
+    A real offboarding push is `{"email": ..., "status": "deactivated"}` with
+    no `admin` key at all — the IdM has no reason to restate an admin block for
+    someone who just left. `test_deactivated_status_also_deactivates_the_admin_record`
+    re-sends `admin`, so it never covered this path, and the absent-collection
+    rule ("a minimal payload cannot wipe aliases") was wrongly extended to a
+    field that is not a collection and was not absent.
+    """
+    domain_name = f"off-{status}.example.com"
+    email = f"jane@{domain_name}"
+    external_id = f"off-{status}"
+    await _seed_domain(sessionmaker_, domain_name)
+
+    async with sessionmaker_() as session:
+        identity = await provisioning_service.upsert_identity(
+            session, external_id, _payload(email, admin={"role": "superadmin"})
+        )
+        user_id = identity.user_id
+        assert (await session.get(User, user_id)).is_active is True
+
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session, external_id, _payload(email, status=status)
+        )
+
+    async with sessionmaker_() as session:
+        user = await session.get(User, user_id)
+        assert user.is_active is False, "an offboarded employee keeps mail-admin access"
+        assert user.role is UserRole.SUPERADMIN, (
+            "role is governed by `admin`, which was absent — only `is_active` moves"
+        )
+
+
+@pytest.mark.asyncio
+async def test_reactivation_restores_operator_access_when_admin_is_omitted(sessionmaker_):
+    """The status mapping is symmetric: if an absent `admin` cannot stop
+    `deactivated` from revoking access, it must not stop `active` from
+    restoring it either."""
+    await _seed_domain(sessionmaker_, "reon.example.com")
+    email = "jane@reon.example.com"
+
+    async with sessionmaker_() as session:
+        identity = await provisioning_service.upsert_identity(
+            session, "reon-1", _payload(email, admin={"role": "domain_admin"})
+        )
+        user_id = identity.user_id
+
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session, "reon-1", _payload(email, status="deactivated")
+        )
+    async with sessionmaker_() as session:
+        assert (await session.get(User, user_id)).is_active is False
+
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session, "reon-1", _payload(email, status="active")
+        )
+
+    async with sessionmaker_() as session:
+        user = await session.get(User, user_id)
+        assert user.is_active is True
+        assert user.role is UserRole.DOMAIN_ADMIN
+
+
+@pytest.mark.asyncio
+async def test_explicit_null_admin_beats_an_active_status(sessionmaker_):
+    """Ordering guard for the fix above: the status mapping now runs for every
+    linked user, but `"admin": null` must still win — it means "no longer an
+    operator", independent of whether the person is still employed."""
+    await _seed_domain(sessionmaker_, "nulladm.example.com")
+    email = "jane@nulladm.example.com"
+
+    async with sessionmaker_() as session:
+        identity = await provisioning_service.upsert_identity(
+            session, "nulladm-1", _payload(email, admin={"role": "superadmin"})
+        )
+        user_id = identity.user_id
+
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session, "nulladm-1", _payload(email, status="active", admin=None)
+        )
+
+    async with sessionmaker_() as session:
+        assert (await session.get(User, user_id)).is_active is False
+
+
+@pytest.mark.asyncio
 async def test_unknown_admin_domain_is_rejected(sessionmaker_):
     await _seed_domain(sessionmaker_, "ad6.example.com")
     async with sessionmaker_() as session:
