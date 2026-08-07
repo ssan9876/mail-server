@@ -17,10 +17,11 @@ depends_on: Union[str, Sequence[str], None] = None
 _UUID_DEFAULT = sa.text("gen_random_uuid()")
 _NOW = sa.text("now()")
 
-# actor_type is VARCHAR + CHECK (native_enum=False), so widening it means
-# dropping and recreating the constraint rather than an ALTER TYPE.
-_OLD_ACTORS = "'user', 'mailbox', 'system'"
-_NEW_ACTORS = "'user', 'mailbox', 'system', 'idm'"
+# NOTE: adding `idm` to ActorType needs NO schema change. SQLAlchemy's
+# `Enum(..., native_enum=False)` defaults to `create_constraint=False`, so
+# `audit_logs.actor_type` is a plain VARCHAR(20) with no CHECK constraint to
+# widen — verified by compiling the 0001 table definition. Validation is
+# Python-side (`validate_strings=True`), and 'idm' fits the existing column.
 
 
 def upgrade() -> None:
@@ -91,27 +92,15 @@ def upgrade() -> None:
         ),
     )
 
-    # SQLite cannot drop a CHECK constraint; tests build the schema with
-    # create_all rather than migrations, so skipping there is correct.
-    bind = op.get_bind()
-    if bind.dialect.name == "postgresql":
-        op.drop_constraint("ck_audit_logs_actortype", "audit_logs", type_="check")
-        op.create_check_constraint(
-            "actortype", "audit_logs", f"actor_type IN ({_NEW_ACTORS})"
-        )
+    # No actor_type work here — see the module note above.
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    if bind.dialect.name == "postgresql":
-        # Any 'idm' rows would violate the narrowed constraint. Audit logs are
-        # append-only and must not be deleted, so they are relabelled 'system'
-        # — the closest surviving value — rather than dropped.
-        op.execute("UPDATE audit_logs SET actor_type = 'system' WHERE actor_type = 'idm'")
-        op.drop_constraint("ck_audit_logs_actortype", "audit_logs", type_="check")
-        op.create_check_constraint(
-            "actortype", "audit_logs", f"actor_type IN ({_OLD_ACTORS})"
-        )
+    # 'idm' is not a member of ActorType after this migration is reversed, and
+    # the column's Python-side validation would raise when loading such a row.
+    # Audit logs are append-only and must never be deleted, so existing rows
+    # are relabelled to 'system' — the closest surviving value — not dropped.
+    op.execute("UPDATE audit_logs SET actor_type = 'system' WHERE actor_type = 'idm'")
 
     op.drop_table("idm_identity_aliases")
     op.drop_index("ix_idm_identities_external_id", table_name="idm_identities")

@@ -76,4 +76,7 @@ async def test_service_token_stores_hash_not_raw(sessionmaker_):
         assert token.is_active is True
         assert token.expires_at is None
         assert token.last_used_at is None
-        assert not hasattr(token, "token")
+        # Verify no plaintext-credential columns exist; the model stores only the hash
+        col_names = {col.name for col in IdmServiceToken.__table__.columns}
+        assert "token_hash" in col_names
+        assert not (col_names & {"token", "raw_token", "secret", "password"})
