@@ -7,9 +7,18 @@ The same variable names are documented in `.env.example`.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import computed_field
+from pydantic import computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
+
+# Settings that must be replaced with real secrets before a production boot.
+_SECRET_SETTINGS = (
+    "JWT_SECRET_KEY",
+    "SECRETS_ENCRYPTION_KEY",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_MAIL_PASSWORD",
+    "ADMIN_PASSWORD",
+)
 
 
 class Settings(BaseSettings):
@@ -110,6 +119,34 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT == "production"
+
+    @model_validator(mode="after")
+    def _require_real_secrets_in_production(self) -> "Settings":
+        """Refuse to boot a production deployment on placeholder credentials.
+
+        Every secret defaults to "changeme" (and .env.example ships
+        "changeme-..." values); running production with any of them left in
+        place would mean forgeable JWTs, a guessable superadmin password, and
+        DKIM keys encrypted with a known key.
+        """
+        if self.ENVIRONMENT != "production":
+            return self
+        weak = [
+            name
+            for name in _SECRET_SETTINGS
+            if not getattr(self, name) or getattr(self, name).lower().startswith("changeme")
+        ]
+        if weak:
+            raise ValueError(
+                "Refusing to start in production with placeholder secrets: "
+                f"{', '.join(weak)}. Generate real values (see .env.example)."
+            )
+        if len(self.JWT_SECRET_KEY) < 32:
+            raise ValueError(
+                "JWT_SECRET_KEY must be at least 32 characters in production "
+                "(generate with: openssl rand -hex 32)."
+            )
+        return self
 
 
 @lru_cache

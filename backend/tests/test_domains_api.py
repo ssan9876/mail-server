@@ -89,6 +89,41 @@ async def test_dkim_rotation_changes_state(client):
     assert before_dkim != after_dkim  # new key material
 
 
+@pytest.mark.usefixtures("superadmin")
+async def test_catch_all_box_must_belong_to_domain(client):
+    from tests.conftest import ADMIN_EMAIL, ADMIN_PASSWORD
+
+    headers = await login_headers(client, ADMIN_EMAIL, ADMIN_PASSWORD)
+    dom_a = (await client.post(DOMAINS, json={"name": "cata.com"}, headers=headers)).json()
+    dom_b = (await client.post(DOMAINS, json={"name": "catb.com"}, headers=headers)).json()
+    box_a = (
+        await client.post(
+            f"{DOMAINS}/{dom_a['id']}/mailboxes",
+            json={"local_part": "inbox", "password": "password1234"},
+            headers=headers,
+        )
+    ).json()
+    box_b = (
+        await client.post(
+            f"{DOMAINS}/{dom_b['id']}/mailboxes",
+            json={"local_part": "inbox", "password": "password1234"},
+            headers=headers,
+        )
+    ).json()
+
+    ok = await client.patch(
+        f"{DOMAINS}/{dom_a['id']}", json={"catch_all_box": box_a["id"]}, headers=headers
+    )
+    assert ok.status_code == 200
+    assert ok.json()["catch_all_box"] == box_a["id"]
+
+    # A mailbox from another domain must be rejected.
+    cross = await client.patch(
+        f"{DOMAINS}/{dom_a['id']}", json={"catch_all_box": box_b["id"]}, headers=headers
+    )
+    assert cross.status_code == 404
+
+
 # --------------------------------------------------------------------------- #
 # Role scoping
 # --------------------------------------------------------------------------- #

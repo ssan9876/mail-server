@@ -22,6 +22,11 @@ server {
         include /etc/nginx/includes/proxy.conf;
         proxy_pass http://backend:8000;
     }
+    location = /api/v1/mailbox/login {
+        limit_req zone=login burst=5 nodelay;
+        include /etc/nginx/includes/proxy.conf;
+        proxy_pass http://backend:8000;
+    }
     location /api/v1/password-reset/ {
         limit_req zone=login burst=5 nodelay;
         include /etc/nginx/includes/proxy.conf;

@@ -15,7 +15,7 @@ import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.dovecot_password import verify_dovecot
+from app.core.dovecot_password import hash_for_dovecot, verify_dovecot
 from app.core.exceptions import AuthenticationError, RateLimitError
 from app.core.security import (
     TokenError,
@@ -32,6 +32,10 @@ _BLACKLIST_PREFIX = "bl:"
 _MLOGINFAIL_PREFIX = "mloginfail:"
 _LOCKOUT_WINDOW_SECONDS = 900
 
+# Verified against when no mailbox matches, keeping login timing uniform so
+# responses don't reveal which addresses exist.
+_DUMMY_HASH = hash_for_dovecot("timing-equalizer-dummy-password")
+
 
 async def _assert_not_locked(redis: aioredis.Redis, email: str) -> None:
     attempts = await redis.get(f"{_MLOGINFAIL_PREFIX}{email}")
@@ -41,8 +45,10 @@ async def _assert_not_locked(redis: aioredis.Redis, email: str) -> None:
 
 async def _record_failure(redis: aioredis.Redis, email: str) -> None:
     key = f"{_MLOGINFAIL_PREFIX}{email}"
-    if await redis.incr(key) == 1:
-        await redis.expire(key, _LOCKOUT_WINDOW_SECONDS)
+    await redis.incr(key)
+    # Always (re)apply the TTL so a crash between INCR and EXPIRE can never
+    # leave a counter without expiry (permanent lockout).
+    await redis.expire(key, _LOCKOUT_WINDOW_SECONDS)
 
 
 def _ttl_seconds(expires_at: datetime) -> int:
@@ -69,7 +75,12 @@ async def authenticate(
     await _assert_not_locked(redis, email)
 
     mailbox = await mailbox_service.get_by_address(db, email)
-    valid = bool(mailbox) and mailbox.is_active and verify_dovecot(password, mailbox.password_hash)
+    if mailbox is None:
+        # Burn the same Argon2 work as a real verification (timing uniformity).
+        verify_dovecot(password, _DUMMY_HASH)
+        valid = False
+    else:
+        valid = mailbox.is_active and verify_dovecot(password, mailbox.password_hash)
     if not valid:
         await _record_failure(redis, email)
         raise AuthenticationError("Invalid email or password.")
@@ -120,8 +131,6 @@ async def logout(
 async def change_password(
     db: AsyncSession, mailbox: Mailbox, current_password: str, new_password: str
 ) -> None:
-    from app.core.dovecot_password import hash_for_dovecot
-
     if not verify_dovecot(current_password, mailbox.password_hash):
         raise AuthenticationError("Current password is incorrect.")
     mailbox.password_hash = hash_for_dovecot(new_password)
