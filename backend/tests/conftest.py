@@ -59,7 +59,13 @@ async def engine():
 
 @pytest_asyncio.fixture
 async def sessionmaker_(engine):
-    return async_sessionmaker(engine, expire_on_commit=False)
+    # `autoflush=False` mirrors `app.core.database.AsyncSessionLocal` exactly.
+    # It is not a tuning knob: under autoflush, a query implicitly flushes
+    # pending in-memory mutations first, so every collision check in the
+    # service layer sees state that production's sessions would NOT have
+    # written yet. Tests run under the same semantics as production or they
+    # are not testing production.
+    return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
 
 @pytest_asyncio.fixture

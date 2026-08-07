@@ -43,6 +43,17 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+class UnprocessableError(AppError):
+    """The request is well-formed but names something that cannot be used.
+
+    Distinct from NotFoundError: the IdM's connector treats 422 as a permanent
+    failure to dead-letter, while a 404 on a GET is an ordinary miss.
+    """
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "unprocessable"
+
+
 class RateLimitError(AppError):
     status_code = status.HTTP_429_TOO_MANY_REQUESTS
     code = "rate_limited"

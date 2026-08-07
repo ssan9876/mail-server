@@ -16,3 +16,4 @@ class ActorType(str, enum.Enum):
     USER = "user"
     MAILBOX = "mailbox"
     SYSTEM = "system"
+    IDM = "idm"  # an external identity provider, via the provisioning API

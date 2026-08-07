@@ -49,8 +49,15 @@ async def get_domain(db: AsyncSession, user: User, domain_id: uuid.UUID) -> Doma
     return domain
 
 
+async def get_by_name(db: AsyncSession, name: str) -> Domain | None:
+    """Unscoped lookup by domain name — used by the provisioning path, which
+    authenticates a service token rather than a user."""
+    result = await db.execute(select(Domain).where(Domain.name == name.strip().lower()))
+    return result.scalar_one_or_none()
+
+
 async def _get_by_name(db: AsyncSession, name: str) -> Domain | None:
-    return (await db.execute(select(Domain).where(Domain.name == name))).scalar_one_or_none()
+    return await get_by_name(db, name)
 
 
 async def create_domain(

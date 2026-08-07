@@ -9,6 +9,7 @@ from app.models.audit_log import AuditLog
 from app.models.base import Base
 from app.models.domain import Domain
 from app.models.enums import ActorType, UserRole
+from app.models.idm import IdmIdentity, IdmIdentityAlias, IdmServiceToken
 from app.models.mailbox import Mailbox
 from app.models.password_reset import PasswordResetToken
 from app.models.user import User
@@ -23,4 +24,7 @@ __all__ = [
     "AuditLog",
     "UserRole",
     "ActorType",
+    "IdmServiceToken",
+    "IdmIdentity",
+    "IdmIdentityAlias",
 ]

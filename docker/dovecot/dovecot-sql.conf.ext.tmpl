@@ -3,8 +3,15 @@
 #
 #   %n = local part, %d = domain, %u = full address.
 #
-# The password hash carries an inline {ARGON2ID} scheme prefix, so Dovecot
-# auto-detects the scheme; no default_pass_scheme is needed.
+# Every value in mailboxes.password_hash carries an inline {SCHEME} prefix, so
+# Dovecot auto-detects the scheme and no default_pass_scheme is needed. Real
+# passwords use {ARGON2ID}; IdM-provisioned mailboxes that have no credential
+# yet store a deliberately unmatchable {CRYPT}* placeholder (see
+# UNUSABLE_PASSWORD_HASH in backend/app/schemas/provisioning.py).
+#
+# Do NOT set default_pass_scheme: it applies only to prefix-less values, so
+# setting it cannot help anything here, and it would turn any future
+# prefix-less placeholder into a literal working password.
 # ============================================================================
 driver = pgsql
 connect = host=${POSTGRES_HOST} dbname=${POSTGRES_DB} user=${POSTGRES_MAIL_USER} password=${POSTGRES_MAIL_PASSWORD}
@@ -15,9 +22,13 @@ password_query = \
   WHERE m.local_part = '%n' AND d.name = '%d' \
     AND m.is_active = true AND d.is_active = true
 
+# `maildir_path` is the single authority for where a mailbox lives — Postfix's
+# virtual_mailbox_maps.cf already reads it. Deriving the path here instead
+# would break renames: an IdM-driven rename changes local_part but deliberately
+# keeps maildir_path so existing mail follows the user.
 user_query = \
-  SELECT '/maildata/' || d.name || '/' || m.local_part AS home, \
-         'maildir:/maildata/' || d.name || '/' || m.local_part AS mail, \
+  SELECT m.maildir_path AS home, \
+         'maildir:' || m.maildir_path AS mail, \
          5000 AS uid, 5000 AS gid, \
          ('*:bytes=' || (m.quota_mb::bigint * 1048576)) AS quota_rule \
   FROM mailboxes m JOIN domains d ON m.domain_id = d.id \

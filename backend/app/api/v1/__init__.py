@@ -6,9 +6,11 @@ from app.api.v1 import (
     audit,
     auth,
     domains,
+    idm_tokens,
     mailbox_portal,
     mailboxes,
     password_reset,
+    provisioning,
 )
 
 api_router = APIRouter()
@@ -19,3 +21,5 @@ api_router.include_router(domains.router)
 api_router.include_router(mailboxes.router)
 api_router.include_router(aliases.router)
 api_router.include_router(audit.router)
+api_router.include_router(idm_tokens.router)
+api_router.include_router(provisioning.router)
