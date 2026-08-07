@@ -23,10 +23,12 @@
 - **Tests run in Docker, not on the host.** The host has Python 3.14; the project pins its dependencies for 3.12, and `fakeredis`/`aiosqlite` are not installed locally. Build once with `docker build --target dev -t mail-server-backend-dev ./backend`, then run:
 
   ```bash
-  docker run --rm --entrypoint python -v "D:/mail-server/backend:/app" mail-server-backend-dev -m pytest -q
+  MSYS_NO_PATHCONV=1 docker run --rm -w /repo/backend --entrypoint python       -v "D:/mail-server:/repo" mail-server-backend-dev -m pytest -q
   ```
 
-  Append a path for a focused run, e.g. `… -m pytest tests/test_idm_models.py -v`. The bind mount means edits on the host are picked up with no rebuild. All new tests follow the existing SQLite + `conftest.py` fixture pattern.
+  Append a path for a focused run, e.g. `… -m pytest tests/test_idm_models.py -v`. The bind mount means edits on the host are picked up with no rebuild.
+
+  **Mount the repo root, not `backend/`.** `tests/test_mail_config_templates.py` reads config files under `docker/`, which live above `backend/`; a backend-only mount makes those tests fail with a bare `FileNotFoundError`. `MSYS_NO_PATHCONV=1` stops Git Bash rewriting the container-side paths. All new tests follow the existing SQLite + `conftest.py` fixture pattern.
 - Follow existing module conventions: `from __future__ import annotations`, services are modules of functions (not classes), routers are `APIRouter` instances aggregated in `app/api/v1/__init__.py`.
 
 ---
