@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError, NotFoundError, UnprocessableError
 from app.models.alias import Alias
 from app.models.domain import Domain
-from app.models.enums import UserRole
+from app.models.enums import ActorType, UserRole
 from app.models.idm import IdmIdentity, IdmIdentityAlias
 from app.models.mailbox import Mailbox
 from app.models.user import User
@@ -31,7 +31,7 @@ from app.schemas.provisioning import (
     IdentityUpsert,
     canonical_hash,
 )
-from app.services import domain_service, mailbox_service, user_service
+from app.services import audit_service, domain_service, mailbox_service, user_service
 
 # The IdM's four lifecycle values, mapped to mailbox reachability. Only
 # `active` is a live principal — mirroring how the counterpart system treats
@@ -88,6 +88,14 @@ async def upsert_identity(
             db, external_id, payload, token_id=token_id, ip_address=ip_address
         )
     except Exception:
+        # `app.core.database.get_db` also rolls back on any exception escaping
+        # a request, so this is redundant for the HTTP path — but this
+        # function is also called directly (see tests/test_provisioning_*.py,
+        # which drive it against a bare session with no request lifecycle
+        # around it). Rolling back here, rather than trusting the caller to,
+        # is what keeps "on any failure the session is rolled back" true
+        # regardless of caller. Do not remove this on the assumption
+        # `get_db` already covers it.
         await db.rollback()
         raise
 
@@ -148,9 +156,6 @@ async def _upsert_identity_inner(
 
     identity.last_payload_hash = payload_hash
     identity.last_synced_at = datetime.now(timezone.utc)
-
-    from app.models.enums import ActorType
-    from app.services import audit_service
 
     await audit_service.record(
         db,

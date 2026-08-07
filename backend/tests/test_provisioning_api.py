@@ -4,9 +4,10 @@ from sqlalchemy import select
 
 from app.models.audit_log import AuditLog
 from app.models.domain import Domain
-from app.models.enums import ActorType
+from app.models.enums import ActorType, UserRole
 from app.models.idm import IdmIdentity
 from app.models.mailbox import Mailbox
+from app.services import user_service
 from tests.conftest import ADMIN_EMAIL, ADMIN_PASSWORD, login_headers
 
 
@@ -137,6 +138,79 @@ async def test_audit_entry_written_once_per_real_change(client, svc, sessionmake
         ).scalars().all()
         assert len(rows) == 1, "a no-op push must not write an audit entry"
         assert rows[0].actor_type is ActorType.IDM
+
+
+@pytest.mark.asyncio
+async def test_reassigned_domains_lands_in_the_persisted_audit_row(client, svc, sessionmaker_):
+    """Domain ownership is last-write-wins by explicit decision, so this audit
+    entry is the ONLY record that an administrator's domain was reassigned
+    away from them. Task 7 tests `_converge_admin`'s return value in
+    isolation; this drives a real reassignment through the HTTP route and
+    inspects the persisted `AuditLog.meta` from a fresh session, proving the
+    value is actually wired into the audit call rather than merely computed
+    and discarded.
+    """
+    async with sessionmaker_() as session:
+        session.add(Domain(name="reassign.example.com"))
+        await session.commit()
+
+        previous_owner = await user_service.create_user(
+            session,
+            email="previous-owner@reassign.example.com",
+            password="not-usable-by-the-idm",
+            role=UserRole.DOMAIN_ADMIN,
+        )
+        domain = (
+            await session.execute(
+                select(Domain).where(Domain.name == "reassign.example.com")
+            )
+        ).scalar_one()
+        domain.owner_id = previous_owner.id
+        await session.commit()
+        previous_owner_id = previous_owner.id
+
+    resp = await client.put(
+        "/api/v1/provisioning/identities/ext-109",
+        json={
+            "email": "newowner@api.example.com",
+            "status": "active",
+            "admin": {"role": "domain_admin", "domains": ["reassign.example.com"]},
+        },
+        headers=svc,
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with sessionmaker_() as session:
+        row = (
+            await session.execute(
+                select(AuditLog).where(AuditLog.action == "idm.identity.synced")
+            )
+        ).scalar_one()
+        assert row.meta["reassigned_domains"] == [
+            {"domain": "reassign.example.com", "from": str(previous_owner_id)}
+        ]
+
+
+@pytest.mark.asyncio
+async def test_no_reassignment_stores_null_not_empty_list(client, svc, sessionmaker_):
+    """The `reassigned_domains or None` conversion is easy to lose in a future
+    edit — a push that reassigns nothing must persist `null`, not `[]`, so a
+    reader of the audit log can tell "checked, nothing moved" apart from
+    "field never populated"."""
+    resp = await client.put(
+        "/api/v1/provisioning/identities/ext-110",
+        json={"email": "noadmin@api.example.com", "status": "active"},
+        headers=svc,
+    )
+    assert resp.status_code == 200, resp.text
+
+    async with sessionmaker_() as session:
+        row = (
+            await session.execute(
+                select(AuditLog).where(AuditLog.action == "idm.identity.synced")
+            )
+        ).scalar_one()
+        assert row.meta["reassigned_domains"] is None
 
 
 @pytest.mark.asyncio
