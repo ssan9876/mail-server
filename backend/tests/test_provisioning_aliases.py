@@ -1,11 +1,13 @@
 """IdM-owned alias convergence."""
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.core.exceptions import ConflictError, UnprocessableError
 from app.models.alias import Alias
 from app.models.domain import Domain
 from app.models.idm import IdmIdentityAlias
+from app.models.mailbox import Mailbox
 from app.schemas.provisioning import IdentityUpsert
 from app.services import provisioning_service
 
@@ -210,3 +212,210 @@ async def test_multi_alias_collision_rolls_back_the_earlier_created_alias(sessio
         assert await _alias_local_parts(session, domain.id) == ["collides"]
         links = (await session.execute(select(IdmIdentityAlias))).all()
         assert links == []
+
+
+@pytest.mark.asyncio
+async def test_no_alias_with_a_catch_all_local_part_can_ever_be_provisioned(
+    sessionmaker_,
+):
+    """Regression guard on the whole path, not just the regex.
+
+    `_split_address` splits on the LAST `@`, so `"@@d"` yields `local_part ==
+    "@"` — the domain catch-all convention Postfix's
+    `virtual_alias_catchall.cf` matches. A double-`@` typo would silently
+    divert every unrouted address in the domain into one mailbox. Nothing that
+    reaches the alias table through provisioning may carry that local part.
+    """
+    domain = await _seed_domain(sessionmaker_, "catchall.example.com")
+
+    for bad in ["@@catchall.example.com", "@catchall.example.com", "@"]:
+        with pytest.raises(ValidationError):
+            _payload("jane@catchall.example.com", aliases=[bad])
+
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session,
+            "al-catchall",
+            _payload("jane@catchall.example.com", aliases=["j@catchall.example.com"]),
+        )
+
+    async with sessionmaker_() as session:
+        catch_alls = (
+            await session.execute(
+                select(Alias).where(
+                    Alias.domain_id == domain.id, Alias.local_part == "@"
+                )
+            )
+        ).scalars().all()
+        assert catch_alls == []
+
+
+@pytest.mark.asyncio
+async def test_rename_keeping_the_old_address_as_an_alias(sessionmaker_):
+    """A name change that keeps the previous address reachable.
+
+    Sessions are `autoflush=False` in production, so the rename
+    `_converge_mailbox` applies in memory is invisible to `_converge_aliases`'
+    collision query unless the service flushes in between. Without that flush
+    this raised a false `409 jane@... already exists` — and 409 is a permanent
+    dead-letter, not a retry, so the rename would never land.
+    """
+    domain = await _seed_domain(sessionmaker_, "keepold.example.com")
+    async with sessionmaker_() as session:
+        identity = await provisioning_service.upsert_identity(
+            session, "al-11", _payload("jane@keepold.example.com")
+        )
+        mailbox_id = identity.mailbox_id
+
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session,
+            "al-11",
+            _payload(
+                "jsmith@keepold.example.com", aliases=["jane@keepold.example.com"]
+            ),
+        )
+
+    async with sessionmaker_() as session:
+        mailbox = await session.get(Mailbox, mailbox_id)
+        assert mailbox.local_part == "jsmith"
+        assert await _alias_local_parts(session, domain.id) == ["jane"]
+        alias = (
+            await session.execute(select(Alias).where(Alias.local_part == "jane"))
+        ).scalar_one()
+        assert alias.destination == "jsmith@keepold.example.com"
+
+
+@pytest.mark.asyncio
+async def test_swapping_the_primary_address_with_an_owned_alias(sessionmaker_):
+    """`jane` <-> `j.doe`, both already owned by this identity.
+
+    `_converge_mailbox` runs before `_converge_aliases`, so the new primary
+    address collides with an alias that the very same transaction is about to
+    reconcile away. Treating that as a conflict left the IdM unable to express
+    a name change over an address it already owns — and 409 dead-letters.
+    """
+    domain = await _seed_domain(sessionmaker_, "swap.example.com")
+    async with sessionmaker_() as session:
+        identity = await provisioning_service.upsert_identity(
+            session,
+            "al-12",
+            _payload("jane@swap.example.com", aliases=["j.doe@swap.example.com"]),
+        )
+        mailbox_id = identity.mailbox_id
+
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session,
+            "al-12",
+            _payload("j.doe@swap.example.com", aliases=["jane@swap.example.com"]),
+        )
+
+    async with sessionmaker_() as session:
+        mailbox = await session.get(Mailbox, mailbox_id)
+        assert mailbox.local_part == "j.doe"
+        assert await _alias_local_parts(session, domain.id) == ["jane"]
+        alias = (
+            await session.execute(select(Alias).where(Alias.local_part == "jane"))
+        ).scalar_one()
+        assert alias.destination == "j.doe@swap.example.com"
+        links = (await session.execute(select(IdmIdentityAlias))).scalars().all()
+        assert len(links) == 1, "exactly one owned alias survives the swap"
+
+
+@pytest.mark.asyncio
+async def test_primary_address_still_collides_with_another_identity_alias(
+    sessionmaker_,
+):
+    """The exclusion above is narrow: only aliases owned by THIS identity."""
+    await _seed_domain(sessionmaker_, "swap2.example.com")
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session,
+            "al-13a",
+            _payload("alice@swap2.example.com", aliases=["shared@swap2.example.com"]),
+        )
+        await provisioning_service.upsert_identity(
+            session, "al-13b", _payload("bob@swap2.example.com")
+        )
+
+    async with sessionmaker_() as session:
+        with pytest.raises(ConflictError, match="shared@swap2.example.com"):
+            await provisioning_service.upsert_identity(
+                session, "al-13b", _payload("shared@swap2.example.com")
+            )
+
+
+@pytest.mark.asyncio
+async def test_primary_address_still_collides_with_an_admin_created_alias(
+    sessionmaker_,
+):
+    domain = await _seed_domain(sessionmaker_, "swap3.example.com")
+    async with sessionmaker_() as session:
+        session.add(
+            Alias(
+                domain_id=domain.id,
+                local_part="handmade",
+                destination="someone@swap3.example.com",
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker_() as session:
+        with pytest.raises(ConflictError, match="handmade@swap3.example.com"):
+            await provisioning_service.upsert_identity(
+                session, "al-14", _payload("handmade@swap3.example.com")
+            )
+
+
+@pytest.mark.asyncio
+async def test_alias_clash_names_the_owning_idm_identity(sessionmaker_):
+    """"... is not managed by the IdM" is untrue when the clash is with another
+    IdM identity's alias, and it points the operator at the wrong system to fix
+    it. Name the owning `external_id` instead."""
+    await _seed_domain(sessionmaker_, "clashmsg.example.com")
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session,
+            "clash-owner",
+            _payload(
+                "alice@clashmsg.example.com", aliases=["shared@clashmsg.example.com"]
+            ),
+        )
+
+    async with sessionmaker_() as session:
+        with pytest.raises(ConflictError, match="managed by IdM identity clash-owner"):
+            await provisioning_service.upsert_identity(
+                session,
+                "clash-other",
+                _payload(
+                    "bob@clashmsg.example.com", aliases=["shared@clashmsg.example.com"]
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_alias_clash_with_an_admin_created_alias_says_not_managed(sessionmaker_):
+    """The other half of the same message: an alias with no IdM owner really is
+    unmanaged, and the operator fixes it here rather than in the IdM."""
+    domain = await _seed_domain(sessionmaker_, "clashmsg2.example.com")
+    async with sessionmaker_() as session:
+        session.add(
+            Alias(
+                domain_id=domain.id,
+                local_part="handmade",
+                destination="someone@clashmsg2.example.com",
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker_() as session:
+        with pytest.raises(ConflictError, match="is not managed by the IdM"):
+            await provisioning_service.upsert_identity(
+                session,
+                "clash-admin",
+                _payload(
+                    "jane@clashmsg2.example.com",
+                    aliases=["handmade@clashmsg2.example.com"],
+                ),
+            )

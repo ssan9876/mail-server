@@ -136,6 +136,15 @@ async def _upsert_identity_inner(
 
     await _converge_mailbox(db, identity, domain, local_part, payload)
 
+    # Alias and admin convergence below both QUERY the database for collisions.
+    # Sessions are built with `autoflush=False` (see `app.core.database`), so a
+    # rename applied in memory just above would be invisible to those queries:
+    # freeing `jane` by renaming the mailbox to `jsmith` and re-adding `jane`
+    # as an alias in the same push would raise a bogus "already exists". Flush
+    # so the collision checks read current state. Do not rely on autoflush —
+    # production does not have it, and neither does the test suite.
+    await db.flush()
+
     mailbox = await db.get(Mailbox, identity.mailbox_id)
     if mailbox is not None:
         await _converge_aliases(db, identity, mailbox, domain.name, payload)
@@ -199,8 +208,29 @@ async def _converge_mailbox(
         else None
     )
 
+    # Aliases THIS identity already owns are not real collisions for its own
+    # primary address: `_converge_aliases` reconciles them later in the very
+    # same transaction, so swapping the primary address with an alias the IdM
+    # already holds (`jane` <-> `j.doe`) is a legitimate rename, not a clash.
+    # Without this exclusion that swap is a permanent 409 and the IdM has no
+    # way to express a name change over an address it already owns.
+    #
+    # Deliberately narrow: aliases owned by a DIFFERENT identity, aliases an
+    # admin created by hand, and every mailbox still collide as before.
+    own_alias_ids = set(
+        (
+            await db.execute(
+                select(IdmIdentityAlias.alias_id).where(
+                    IdmIdentityAlias.identity_id == identity.id
+                )
+            )
+        ).scalars()
+    )
+
     if mailbox is None:
-        if await mailbox_service.local_part_taken(db, domain.id, local_part):
+        if await mailbox_service.local_part_taken(
+            db, domain.id, local_part, exclude_alias_ids=own_alias_ids
+        ):
             raise ConflictError(
                 f"{local_part}@{domain.name} already exists (mailbox or alias)."
             )
@@ -224,7 +254,11 @@ async def _converge_mailbox(
     # user's existing mail follows them.
     if mailbox.local_part != local_part or mailbox.domain_id != domain.id:
         if await mailbox_service.local_part_taken(
-            db, domain.id, local_part, exclude_mailbox_id=mailbox.id
+            db,
+            domain.id,
+            local_part,
+            exclude_mailbox_id=mailbox.id,
+            exclude_alias_ids=own_alias_ids,
         ):
             raise ConflictError(
                 f"{local_part}@{domain.name} already exists (mailbox or alias)."
@@ -267,7 +301,10 @@ async def _converge_aliases(
     owned = {alias for alias, _ in owned_rows}
 
     # An omitted collection means "leave untouched" — only the destination is
-    # refreshed, so a rename still repoints aliases the IdM already owns.
+    # refreshed, so a rename still repoints aliases the IdM already owns. The
+    # `is None` arm is unreachable via the schema (an explicit null is a 422);
+    # it stays as a defensive invariant because the annotation is still
+    # `list[str] | None`, which is what keeps OMISSION expressible.
     if "aliases" not in payload.model_fields_set or payload.aliases is None:
         for alias in owned:
             alias.destination = destination
@@ -308,6 +345,26 @@ async def _converge_aliases(
             )
         ).scalar_one_or_none()
         if clash is not None:
+            # Two genuinely different situations, and the operator triaging the
+            # dead-lettered event needs to tell them apart: an alias an admin
+            # created by hand (fix it here, or drop it from the IdM) versus one
+            # another IdM identity already owns (fix it in the IdM, and the
+            # other identity's external_id says which record).
+            other_external_id = (
+                await db.execute(
+                    select(IdmIdentity.external_id)
+                    .join(
+                        IdmIdentityAlias,
+                        IdmIdentityAlias.identity_id == IdmIdentity.id,
+                    )
+                    .where(IdmIdentityAlias.alias_id == clash.id)
+                )
+            ).scalar_one_or_none()
+            if other_external_id is not None:
+                raise ConflictError(
+                    f"{address} already exists and is managed by IdM identity "
+                    f"{other_external_id}."
+                )
             raise ConflictError(
                 f"{address} already exists and is not managed by the IdM."
             )

@@ -5,6 +5,7 @@ password hashing, Maildir path assignment, and routing-collision checks.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,11 +36,18 @@ async def local_part_taken(
     local_part: str,
     *,
     exclude_mailbox_id: uuid.UUID | None = None,
+    exclude_alias_ids: Collection[uuid.UUID] | None = None,
 ) -> bool:
     """Whether `local_part@domain` is claimed by a mailbox or an alias.
 
     `exclude_mailbox_id` lets a rename ignore the row being renamed, which
     would otherwise always collide with itself.
+
+    `exclude_alias_ids` is the same idea one table over: a caller that is about
+    to reconcile a specific set of aliases in the same transaction can exclude
+    them, so they do not collide with an address that is being moved between
+    them. Only provisioning uses it, and only for aliases the identity being
+    converged already owns.
     """
     mailbox_stmt = select(Mailbox.id).where(
         Mailbox.domain_id == domain_id, Mailbox.local_part == local_part
@@ -50,9 +58,12 @@ async def local_part_taken(
     if mb.first():
         return True
 
-    al = await db.execute(
-        select(Alias.id).where(Alias.domain_id == domain_id, Alias.local_part == local_part)
+    alias_stmt = select(Alias.id).where(
+        Alias.domain_id == domain_id, Alias.local_part == local_part
     )
+    if exclude_alias_ids:
+        alias_stmt = alias_stmt.where(Alias.id.notin_(list(exclude_alias_ids)))
+    al = await db.execute(alias_stmt)
     return al.first() is not None
 
 
