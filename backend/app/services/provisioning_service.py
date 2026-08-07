@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, UnprocessableError
@@ -110,8 +110,13 @@ async def upsert_identity(
     if mailbox is not None:
         await _converge_aliases(db, identity, mailbox, domain.name, payload)
     elif payload.aliases:
-        # An alias must forward somewhere; without a mailbox there is no
-        # destination to point at.
+        # Currently unreachable in phase 1: `email` is mandatory on every
+        # payload and `_converge_mailbox` above always creates or finds a
+        # mailbox for it, so `identity.mailbox_id` is never None by this
+        # point. Kept as a defensive invariant for a later phase that may
+        # introduce admin-only identities with no mailbox — an alias must
+        # forward somewhere, and without a mailbox there is no destination
+        # to point at.
         raise UnprocessableError("Cannot set aliases on an identity with no mailbox.")
 
     _apply_lifecycle_stamp(identity, payload.status)
@@ -230,13 +235,13 @@ async def _converge_aliases(
     for key, alias in owned_by_key.items():
         if key not in desired:
             await db.execute(
-                IdmIdentityAlias.__table__.delete().where(
+                delete(IdmIdentityAlias).where(
                     IdmIdentityAlias.alias_id == alias.id
                 )
             )
             await db.delete(alias)
 
-    for (domain_id, alias_local), _address in desired.items():
+    for (domain_id, alias_local), address in desired.items():
         existing = owned_by_key.get((domain_id, alias_local))
         if existing is not None:
             existing.destination = destination
@@ -251,10 +256,10 @@ async def _converge_aliases(
         ).scalar_one_or_none()
         if clash is not None:
             raise ConflictError(
-                f"{alias_local}@… already exists and is not managed by the IdM."
+                f"{address} already exists and is not managed by the IdM."
             )
         if await mailbox_service.local_part_taken(db, domain_id, alias_local):
-            raise ConflictError(f"{alias_local}@… already exists (mailbox or alias).")
+            raise ConflictError(f"{address} already exists (mailbox or alias).")
 
         alias = Alias(
             domain_id=domain_id, local_part=alias_local, destination=destination

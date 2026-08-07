@@ -137,3 +137,76 @@ async def test_a_rename_repoints_alias_destinations(sessionmaker_):
             await session.execute(select(Alias).where(Alias.local_part == "j"))
         ).scalar_one()
         assert alias.destination == "jane.doe@al7.example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_rename_repoints_owned_aliases_when_aliases_field_is_omitted(sessionmaker_):
+    """Distinct from `test_a_rename_repoints_alias_destinations`: that test
+    sends `aliases` present on both pushes, so it only exercises the update
+    branch inside the "collection present" loop. This test omits `aliases`
+    entirely on the renaming push, so it can only pass if the early-return
+    ("collection absent, leave membership untouched") branch itself refreshes
+    `alias.destination` for already-owned aliases.
+    """
+    await _seed_domain(sessionmaker_, "al8.example.com")
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session, "al-8", _payload("jane@al8.example.com", aliases=["j@al8.example.com"])
+        )
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session, "al-8", _payload("jane.doe@al8.example.com")
+        )
+    async with sessionmaker_() as session:
+        alias = (
+            await session.execute(select(Alias).where(Alias.local_part == "j"))
+        ).scalar_one()
+        assert alias.destination == "jane.doe@al8.example.com"
+
+
+@pytest.mark.asyncio
+async def test_alias_collision_with_an_existing_mailbox_is_rejected(sessionmaker_):
+    domain = await _seed_domain(sessionmaker_, "al9.example.com")
+    async with sessionmaker_() as session:
+        # A separate identity's mailbox occupies "taken@al9.example.com".
+        await provisioning_service.upsert_identity(
+            session, "al-9-mbox", _payload("taken@al9.example.com")
+        )
+
+    async with sessionmaker_() as session:
+        with pytest.raises(ConflictError):
+            await provisioning_service.upsert_identity(
+                session, "al-9", _payload("jane@al9.example.com", aliases=["taken@al9.example.com"])
+            )
+
+    async with sessionmaker_() as session:
+        # No alias got created for the identity that requested the collision.
+        assert await _alias_local_parts(session, domain.id) == []
+
+
+@pytest.mark.asyncio
+async def test_multi_alias_collision_rolls_back_the_earlier_created_alias(sessionmaker_):
+    domain = await _seed_domain(sessionmaker_, "al10.example.com")
+    async with sessionmaker_() as session:
+        session.add(
+            Alias(domain_id=domain.id, local_part="collides", destination="someone@al10.example.com")
+        )
+        await session.commit()
+
+    async with sessionmaker_() as session:
+        with pytest.raises(ConflictError):
+            await provisioning_service.upsert_identity(
+                session,
+                "al-10",
+                _payload(
+                    "jane@al10.example.com",
+                    aliases=["fresh@al10.example.com", "collides@al10.example.com"],
+                ),
+            )
+
+    async with sessionmaker_() as session:
+        # "fresh" was created and flushed before "collides" raised — proving
+        # the whole request rolled back rather than leaving it behind.
+        assert await _alias_local_parts(session, domain.id) == ["collides"]
+        links = (await session.execute(select(IdmIdentityAlias))).all()
+        assert links == []
