@@ -99,6 +99,62 @@ async def test_collision_is_409(client, svc):
 
 
 @pytest.mark.asyncio
+async def test_over_long_external_id_is_422_not_500(client, svc):
+    """`idm_identities.external_id` is `String(255)`. Unbounded, an over-long
+    path segment reaches Postgres and raises `DataError` -> 500, and the
+    connector retries 5xx forever instead of dead-lettering a request that can
+    never succeed. SQLite accepts over-long strings silently, so this asserts
+    the API-level constraint rather than relying on the database to enforce it.
+    """
+    too_long = "x" * 256
+    body = {"email": "jane@api.example.com", "status": "active"}
+
+    resp = await client.put(
+        f"/api/v1/provisioning/identities/{too_long}", json=body, headers=svc
+    )
+    assert resp.status_code == 422, resp.text
+
+    read = await client.get(
+        f"/api/v1/provisioning/identities/{too_long}", headers=svc
+    )
+    assert read.status_code == 422, read.text
+
+    # Exactly at the limit still works — the bound is the column width, not an
+    # arbitrary tightening.
+    ok = await client.put(
+        f"/api/v1/provisioning/identities/{'x' * 255}", json=body, headers=svc
+    )
+    assert ok.status_code == 200, ok.text
+
+
+@pytest.mark.asyncio
+async def test_null_aliases_is_422_over_http(client, svc):
+    """An explicit null changes nothing yet would advance `last_synced_at` and
+    write a success audit row. `[]` is how "remove all" is expressed."""
+    resp = await client.put(
+        "/api/v1/provisioning/identities/ext-111",
+        json={"email": "jane@api.example.com", "status": "active", "aliases": None},
+        headers=svc,
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_catch_all_shaped_alias_is_422_over_http(client, svc):
+    """A double-`@` typo must not install a domain catch-all."""
+    resp = await client.put(
+        "/api/v1/provisioning/identities/ext-112",
+        json={
+            "email": "jane@api.example.com",
+            "status": "active",
+            "aliases": ["@@api.example.com"],
+        },
+        headers=svc,
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
 async def test_get_returns_state_and_404s_for_unknown(client, svc):
     await client.put(
         "/api/v1/provisioning/identities/ext-105",

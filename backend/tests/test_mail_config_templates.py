@@ -45,11 +45,19 @@ def test_dovecot_reads_maildir_path_rather_than_deriving_it():
     assert "'/maildata/' || d.name" not in user_query
 
 
+PROVISIONING_LOCATION = "location ^~ /api/v1/provisioning"
+
+
 def test_provisioning_is_not_exposed_at_the_edge():
-    """Provisioning is reachable only on the internal Docker network."""
+    """Provisioning is reachable only on the internal Docker network.
+
+    `^~` with no trailing slash, deliberately: a trailing slash leaves the bare
+    `/api/v1/provisioning` request unmatched, where it falls through to
+    `location /api/` and gets proxied to the backend.
+    """
     content = NGINX_HTTPS.read_text(encoding="utf-8")
-    assert "/api/v1/provisioning/" in content
-    provisioning_block = content.split("/api/v1/provisioning/")[1].split("}")[0]
+    assert PROVISIONING_LOCATION in content
+    provisioning_block = content.split(PROVISIONING_LOCATION)[1].split("}")[0]
     assert "return 404" in provisioning_block
     assert "proxy_pass" not in provisioning_block
 
@@ -58,4 +66,4 @@ def test_provisioning_block_precedes_the_general_api_block():
     """Nginx prefix matching takes the longest match, but ordering the block
     first keeps the intent obvious to the next reader."""
     content = NGINX_HTTPS.read_text(encoding="utf-8")
-    assert content.index("/api/v1/provisioning/") < content.index("location /api/ {")
+    assert content.index(PROVISIONING_LOCATION) < content.index("location /api/ {")

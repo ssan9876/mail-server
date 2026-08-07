@@ -30,9 +30,12 @@ server {
 
     # --- IdM provisioning: internal network only -----------------------------
     # Service-token authenticated and reachable only from inside the Docker
-    # network, so a leaked token is useless from the internet. Longest-prefix
-    # matching means this wins over `location /api/`.
-    location /api/v1/provisioning/ {
+    # network, so a leaked token is useless from the internet. `^~` makes the
+    # prefix match explicit and stops regex locations from being considered,
+    # and dropping the trailing slash covers the bare `/api/v1/provisioning`
+    # path too — with the slash, that exact request fell through to
+    # `location /api/` and was proxied.
+    location ^~ /api/v1/provisioning {
         return 404;
     }
 

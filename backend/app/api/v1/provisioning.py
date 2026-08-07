@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Path, Request
 from sqlalchemy import select
 
 from app.api.deps import DbDep, get_client_ip, require_service_token
@@ -26,6 +26,14 @@ from app.services import provisioning_service
 router = APIRouter(prefix="/provisioning", tags=["provisioning"])
 
 ServiceToken = Annotated[IdmServiceToken, Depends(require_service_token)]
+
+# `idm_identities.external_id` is `String(255)`. Unbounded, an over-long path
+# segment reaches Postgres and raises `DataError` -> 500, and the connector
+# treats 5xx as retriable, so a malformed id would be retried forever instead
+# of dead-lettering. Bounding it here turns that into a 422 the connector can
+# park. SQLite silently accepts over-long strings, so this constraint is the
+# only thing enforcing it in the test suite.
+ExternalId = Annotated[str, Path(min_length=1, max_length=255)]
 
 
 @router.get("/health")
@@ -66,7 +74,7 @@ async def _to_read(db, identity: IdmIdentity) -> IdentityRead:
 
 @router.put("/identities/{external_id}", response_model=IdentityRead)
 async def upsert_identity(
-    external_id: str,
+    external_id: ExternalId,
     payload: IdentityUpsert,
     request: Request,
     token: ServiceToken,
@@ -84,7 +92,7 @@ async def upsert_identity(
 
 @router.get("/identities/{external_id}", response_model=IdentityRead)
 async def get_identity(
-    external_id: str, token: ServiceToken, db: DbDep
+    external_id: ExternalId, token: ServiceToken, db: DbDep
 ) -> IdentityRead:
     identity = await provisioning_service.get_identity(db, external_id)
     return await _to_read(db, identity)
