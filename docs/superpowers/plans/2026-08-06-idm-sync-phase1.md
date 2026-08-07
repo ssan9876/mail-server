@@ -2278,7 +2278,7 @@ git commit -m "feat(idm): converge IdM-owned aliases without touching admin-crea
 
 **Interfaces:**
 - Consumes: `User`, `UserRole`, `Domain`; `UNUSABLE_PASSWORD_HASH`.
-- Produces: `provisioning_service._converge_admin(db, identity, email, payload) -> None`, called from `upsert_identity`. `email` is the lower-cased address from the payload.
+- Produces: `provisioning_service._converge_admin(db, identity, email, payload) -> list[dict]`, called from `upsert_identity`. `email` is the lower-cased address from the payload. Returns the domain reassignments performed, which Task 8 records in the audit entry.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2458,16 +2458,20 @@ _ADMIN_ROLES = {
 
 async def _converge_admin(
     db: AsyncSession, identity: IdmIdentity, email: str, payload: IdentityUpsert
-) -> None:
+) -> list[dict]:
     """Reconcile the control-plane user record.
 
     Provisioned admins never get a usable password: they authenticate via SSO
     in phase 2, and this row exists so an SSO login has something to resolve
     to — the same shape the counterpart system's own console requires (a local
     row plus a role grant before authorization works).
+
+    Returns the domain reassignments performed, for the audit entry.
     """
+    reassigned_domains: list[dict] = []
+
     if "admin" not in payload.model_fields_set:
-        return
+        return reassigned_domains
 
     user: User | None = (
         await db.get(User, identity.user_id) if identity.user_id is not None else None
@@ -2477,7 +2481,7 @@ async def _converge_admin(
         # Deactivate, never delete: audit entries reference this row.
         if user is not None:
             user.is_active = False
-        return
+        return reassigned_domains
 
     if user is None:
         user = User(
@@ -2494,11 +2498,27 @@ async def _converge_admin(
 
     user.is_active = STATUS_ACTIVE_MAP[payload.status]
 
+    # Ownership is last-write-wins by decision: the IdM is the source of truth
+    # for who administers what, so a push reassigns a domain even if another
+    # administrator currently owns it. Two identities both claiming one domain
+    # WILL alternate ownership on every reconcile pass — `Domain.owner_id` is
+    # single-valued and cannot represent shared administration. The audit entry
+    # records every reassignment so the change is visible rather than silent.
+    #
+    # Deliberately add-only: dropping a domain from `admin.domains` does not
+    # clear `owner_id`, because orphaning a live domain is worse than leaving
+    # stale ownership. Removing an administrator is done by deactivating them.
     for domain_name in payload.admin.domains:
         domain = await domain_service.get_by_name(db, domain_name)
         if domain is None:
             raise UnprocessableError(f"Domain {domain_name} is not hosted here.")
+        if domain.owner_id != user.id:
+            reassigned_domains.append(
+                {"domain": domain.name, "from": str(domain.owner_id) if domain.owner_id else None}
+            )
         domain.owner_id = user.id
+
+    return reassigned_domains
 ```
 
 - [ ] **Step 4: Call it from `upsert_identity`**
@@ -2506,7 +2526,9 @@ async def _converge_admin(
 In `upsert_identity`, after the alias block and before `identity.last_payload_hash = payload_hash`, add:
 
 ```python
-    await _converge_admin(db, identity, str(payload.email).lower(), payload)
+    reassigned_domains = await _converge_admin(
+        db, identity, str(payload.email).lower(), payload
+    )
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -2802,6 +2824,9 @@ Inside `_upsert_identity_inner`, immediately before the final `await db.commit()
             "email": str(payload.email).lower(),
             "status": payload.status,
             "token_id": str(token_id) if token_id else None,
+            # Domain ownership is last-write-wins, so this is the only record
+            # that an administrator's domain was reassigned away from them.
+            "reassigned_domains": reassigned_domains or None,
         },
         ip_address=ip_address,
         # Shares this transaction: the log must never outlive a rollback.
