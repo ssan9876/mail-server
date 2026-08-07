@@ -121,7 +121,7 @@ How the IdM's connector authenticates.
 | `id` | UUID PK |
 | `name` | Human label |
 | `token_hash` | SHA-256 of the raw token |
-| `prefix` | First 8 chars, for identifying a token without exposing it |
+| `prefix` | First 16 chars, for identifying a token without exposing it |
 | `is_active` | Revocation |
 | `expires_at` | Nullable |
 | `last_used_at` | Nullable |
@@ -279,10 +279,21 @@ retention window indefinitely.
    and DNS record management. An existing but inactive domain is accepted:
    provisioning is a control-plane act, and refusing it would make bringing a
    domain back online require a full re-sync from the IdM.
-3. Load or create the `idm_identities` row, taking a row-level lock
-   (`SELECT … FOR UPDATE`) so concurrent pushes for one user cannot interleave.
-   The IdM guarantees per-aggregate ordering, but two aggregates touching one
-   identity, or a reconciliation run overlapping live traffic, can still race.
+3. Load or create the `idm_identities` row.
+
+   **Row locking is NOT implemented — deferred, not done.** The intent was a
+   row-level lock (`SELECT … FOR UPDATE`) so concurrent pushes for one user
+   could not interleave: the IdM guarantees per-aggregate ordering, but two
+   aggregates touching one identity, or a reconciliation run overlapping live
+   traffic, can still race. It is deferred because SQLite — which the test
+   suite runs on — cannot express `FOR UPDATE`, so the lock could not be
+   covered by a test.
+
+   Phase 1 is safe only because the connector runs a **single** worker, which
+   serialises pushes at the source. Adding the lock is therefore a hard
+   precondition before more than one connector worker runs concurrently: with
+   two workers and no lock, two pushes for one identity can interleave and the
+   last writer wins on a partially-read state.
 4. No-op check: if the canonical hash of the payload equals `last_payload_hash`,
    update `last_synced_at` and return. The IdM's worker re-asserts full desired
    state on every retry and its reconciliation job re-pushes unchanged users
@@ -364,7 +375,7 @@ forever; `5xx` is retriable. This should be stated in the connector's spec too.
 | Aliases on an identity with no mailbox | `422` |
 | `admin.domains` names an unknown domain | `422` |
 | Malformed payload, or any credential field present | `422` from Pydantic |
-| Concurrent push, same `external_id` | Serialised by row lock |
+| Concurrent push, same `external_id` | **Not serialised.** Row locking is deferred (see step 3); the single-worker connector is what prevents this today |
 | Mid-sync database error | Whole sync rolls back |
 
 The whole convergence runs in one transaction, so a partial failure leaves the
@@ -383,7 +394,13 @@ can never satisfy a provisioning endpoint. This mirrors the isolation the
 existing code already enforces between user and mailbox principals
 (`app/api/deps.py:62`).
 
-Rate limiting reuses `app/core/ratelimit.py`.
+**There is no rate limiting on the provisioning routes.** No `@limiter.limit`
+decorator is applied, and because the routes are blocked at the Nginx edge
+(above), nginx's `limit_req` zones never see provisioning traffic either. The
+control is network reachability plus the service token, not request volume — a
+caller that can reach these routes at all already holds a valid token on the
+internal Docker network. If provisioning is ever exposed beyond that network,
+a rate limit becomes required rather than optional.
 
 ## Testing
 
