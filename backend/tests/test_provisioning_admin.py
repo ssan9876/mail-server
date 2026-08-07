@@ -184,6 +184,53 @@ async def test_admin_email_collision_with_a_non_idm_user_is_rejected(sessionmake
 
 
 @pytest.mark.asyncio
+async def test_admin_rename_collision_with_a_different_pre_existing_user_is_rejected(
+    sessionmaker_,
+):
+    """The email-collision guard in `_converge_admin` covers both the create
+    path (tested above) and the rename path, by its placement before the
+    create-vs-update branch. This exercises the rename path specifically: an
+    existing IdM-managed admin renamed onto an email already held by a
+    DIFFERENT pre-existing user must raise ConflictError (409), not an
+    IntegrityError from the raw unique constraint on `users.email`.
+    """
+    await _seed_domain(sessionmaker_, "ad11.example.com")
+
+    async with sessionmaker_() as session:
+        # A pre-existing, non-IdM-managed user occupying the target email.
+        await user_service.create_user(
+            session, email="occupied@ad11.example.com", password="not-usable-by-the-idm"
+        )
+
+    async with sessionmaker_() as session:
+        # A separate, already-provisioned IdM-managed admin.
+        identity = await provisioning_service.upsert_identity(
+            session,
+            "ad-11",
+            _payload("mover@ad11.example.com", admin={"role": "domain_admin"}),
+        )
+        mover_user_id = identity.user_id
+
+    async with sessionmaker_() as session:
+        with pytest.raises(ConflictError, match="occupied@ad11.example.com"):
+            await provisioning_service.upsert_identity(
+                session,
+                "ad-11",
+                _payload("occupied@ad11.example.com", admin={"role": "domain_admin"}),
+            )
+
+    async with sessionmaker_() as session:
+        mover = await session.get(User, mover_user_id)
+        assert mover.email == "mover@ad11.example.com", "the rename must not have applied"
+        occupied_users = (
+            await session.execute(
+                select(User).where(User.email == "occupied@ad11.example.com")
+            )
+        ).scalars().all()
+        assert len(occupied_users) == 1, "no duplicate/partial user row from the failed rename"
+
+
+@pytest.mark.asyncio
 async def test_422_on_unknown_admin_domain_leaves_the_database_unchanged(sessionmaker_):
     await _seed_domain(sessionmaker_, "ad10.example.com")
     async with sessionmaker_() as session:

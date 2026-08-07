@@ -78,9 +78,28 @@ async def upsert_identity(
 ) -> IdmIdentity:
     """Converge one identity to the payload's desired state.
 
-    Runs as a single unit of work: the caller's session is committed once at
-    the end, so a failure part-way leaves the identity exactly as it was.
+    One unit of work: on any failure the session is rolled back, so a partial
+    payload failure leaves the identity exactly as it was rather than
+    half-converged. The audit entry is written inside the same transaction, so
+    the log can never record a change that did not commit.
     """
+    try:
+        return await _upsert_identity_inner(
+            db, external_id, payload, token_id=token_id, ip_address=ip_address
+        )
+    except Exception:
+        await db.rollback()
+        raise
+
+
+async def _upsert_identity_inner(
+    db: AsyncSession,
+    external_id: str,
+    payload: IdentityUpsert,
+    *,
+    token_id: uuid.UUID | None = None,
+    ip_address: str | None = None,
+) -> IdmIdentity:
     local_part, domain_name = _split_address(str(payload.email))
     domain = await domain_service.get_by_name(db, domain_name)
     if domain is None:
@@ -125,11 +144,34 @@ async def upsert_identity(
     _apply_lifecycle_stamp(identity, payload.status)
     identity.status = payload.status
 
-    # Task 8 folds this into the audit entry; nothing consumes it yet.
     reassigned_domains = await _converge_admin(db, identity, str(payload.email).lower(), payload)
 
     identity.last_payload_hash = payload_hash
     identity.last_synced_at = datetime.now(timezone.utc)
+
+    from app.models.enums import ActorType
+    from app.services import audit_service
+
+    await audit_service.record(
+        db,
+        action="idm.identity.synced",
+        actor_id=None,
+        actor_type=ActorType.IDM,
+        target_type="idm_identity",
+        target_id=identity.id,
+        metadata={
+            "external_id": external_id,
+            "email": str(payload.email).lower(),
+            "status": payload.status,
+            "token_id": str(token_id) if token_id else None,
+            # Domain ownership is last-write-wins, so this is the only record
+            # that an administrator's domain was reassigned away from them.
+            "reassigned_domains": reassigned_domains or None,
+        },
+        ip_address=ip_address,
+        # Shares this transaction: the log must never outlive a rollback.
+        commit=False,
+    )
 
     await db.commit()
     await db.refresh(identity)
