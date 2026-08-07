@@ -20,7 +20,13 @@
 - The whole convergence commits or rolls back as one transaction, audit entry included (`commit=False` on the audit write).
 - The backend container cannot reach the `maildata` volume. Never write, move, or delete Maildir files.
 - `maildir_path` is immutable after creation. A rename changes `local_part`/`domain_id` only.
-- Tests run from `backend/` with `python -m pytest`. All new tests follow the existing SQLite + `conftest.py` fixture pattern.
+- **Tests run in Docker, not on the host.** The host has Python 3.14; the project pins its dependencies for 3.12, and `fakeredis`/`aiosqlite` are not installed locally. Build once with `docker build --target dev -t mail-server-backend-dev ./backend`, then run:
+
+  ```bash
+  docker run --rm --entrypoint python -v "D:/mail-server/backend:/app" mail-server-backend-dev -m pytest -q
+  ```
+
+  Append a path for a focused run, e.g. `… -m pytest tests/test_idm_models.py -v`. The bind mount means edits on the host are picked up with no rebuild. All new tests follow the existing SQLite + `conftest.py` fixture pattern.
 - Follow existing module conventions: `from __future__ import annotations`, services are modules of functions (not classes), routers are `APIRouter` instances aggregated in `app/api/v1/__init__.py`.
 
 ---
