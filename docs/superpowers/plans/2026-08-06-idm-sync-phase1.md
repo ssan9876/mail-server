@@ -1340,6 +1340,7 @@ git commit -m "feat(idm): add closed provisioning payload schema forbidding cred
 **Interfaces:**
 - Consumes: `IdentityUpsert`, `canonical_hash`, `UNUSABLE_PASSWORD_HASH` (Task 4); `mailbox_service.create_mailbox_unscoped`, `local_part_taken` (Task 3); `domain_service.get_by_name` (Task 3).
 - Produces:
+  - `exceptions.UnprocessableError` — status 422
   - `provisioning_service.upsert_identity(db, external_id, payload, *, token_id=None, ip_address=None) -> IdmIdentity`
   - `provisioning_service.get_identity(db, external_id) -> IdmIdentity`
   - `provisioning_service.STATUS_ACTIVE_MAP: dict[str, bool]`
@@ -1357,7 +1358,7 @@ from app.models.domain import Domain
 from app.models.mailbox import Mailbox
 from app.schemas.provisioning import UNUSABLE_PASSWORD_HASH, IdentityUpsert
 from app.services import provisioning_service
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, UnprocessableError
 from sqlalchemy import select
 import pytest
 
@@ -1395,8 +1396,10 @@ async def test_creates_a_mailbox_with_an_unusable_password(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_unknown_domain_is_rejected(sessionmaker_):
+    """422, not 404: the request is well-formed, it just names a domain this
+    server does not host."""
     async with sessionmaker_() as session:
-        with pytest.raises(NotFoundError):
+        with pytest.raises(UnprocessableError):
             await provisioning_service.upsert_identity(
                 session, "ext-2", _payload(email="jane@nowhere.test")
             )
@@ -1592,7 +1595,25 @@ async def test_get_identity_raises_for_unknown_external_id(sessionmaker_):
 Run: `cd backend && python -m pytest tests/test_provisioning_mailbox.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'app.services.provisioning_service'`
 
-- [ ] **Step 3: Write the convergence service**
+- [ ] **Step 3: Add the 422 exception**
+
+The spec distinguishes "this identity does not exist" (`404`) from "your
+payload names something unusable" (`422`). Add to `backend/app/core/exceptions.py`,
+after `NotFoundError`:
+
+```python
+class UnprocessableError(AppError):
+    """The request is well-formed but names something that cannot be used.
+
+    Distinct from NotFoundError: the IdM's connector treats 422 as a permanent
+    failure to dead-letter, while a 404 on a GET is an ordinary miss.
+    """
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "unprocessable"
+```
+
+- [ ] **Step 4: Write the convergence service**
 
 Create `backend/app/services/provisioning_service.py`:
 
@@ -1618,7 +1639,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, UnprocessableError
 from app.models.idm import IdmIdentity
 from app.models.mailbox import Mailbox
 from app.schemas.provisioning import (
@@ -1676,7 +1697,7 @@ async def upsert_identity(
     if domain is None:
         # Never auto-create a domain: that pulls in DKIM key generation and DNS
         # record management, neither of which the IdM knows anything about.
-        raise NotFoundError(f"Domain {domain_name} is not hosted here.")
+        raise UnprocessableError(f"Domain {domain_name} is not hosted here.")
 
     identity = await _load_identity(db, external_id)
     if identity is None:
@@ -1779,15 +1800,16 @@ def _apply_lifecycle_stamp(identity: IdmIdentity, status: str) -> None:
         identity.deactivated_at = datetime.now(timezone.utc)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cd backend && python -m pytest tests/test_provisioning_mailbox.py -v`
 Expected: PASS (all tests including the three from Task 3)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add backend/app/services/provisioning_service.py backend/tests/test_provisioning_mailbox.py
+git add backend/app/services/provisioning_service.py backend/app/core/exceptions.py \
+        backend/tests/test_provisioning_mailbox.py
 git commit -m "feat(idm): converge mailboxes from declarative identity payloads"
 ```
 
@@ -1812,7 +1834,7 @@ Create `backend/tests/test_provisioning_aliases.py`:
 import pytest
 from sqlalchemy import select
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, UnprocessableError
 from app.models.alias import Alias
 from app.models.domain import Domain
 from app.models.idm import IdmIdentityAlias
@@ -1926,7 +1948,7 @@ async def test_admin_created_alias_is_never_adopted_or_removed(sessionmaker_):
 async def test_alias_in_an_unhosted_domain_is_rejected(sessionmaker_):
     await _seed_domain(sessionmaker_, "al6.test")
     async with sessionmaker_() as session:
-        with pytest.raises(NotFoundError):
+        with pytest.raises(UnprocessableError):
             await provisioning_service.upsert_identity(
                 session, "al-6", _payload("jane@al6.test", aliases=["j@elsewhere.test"])
             )
@@ -2003,7 +2025,9 @@ async def _converge_aliases(
         alias_local, alias_domain_name = _split_address(address)
         alias_domain = await domain_service.get_by_name(db, alias_domain_name)
         if alias_domain is None:
-            raise NotFoundError(f"Alias domain {alias_domain_name} is not hosted here.")
+            raise UnprocessableError(
+                f"Alias domain {alias_domain_name} is not hosted here."
+            )
         desired[(alias_domain.id, alias_local)] = address
 
     owned_by_key = {(a.domain_id, a.local_part): a for a in owned}
@@ -2058,7 +2082,7 @@ In `upsert_identity`, replace the line `await _converge_mailbox(db, identity, do
     elif payload.aliases:
         # An alias must forward somewhere; without a mailbox there is no
         # destination to point at.
-        raise ConflictError("Cannot set aliases on an identity with no mailbox.")
+        raise UnprocessableError("Cannot set aliases on an identity with no mailbox.")
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -2094,7 +2118,7 @@ Create `backend/tests/test_provisioning_admin.py`:
 import pytest
 from sqlalchemy import select
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import UnprocessableError
 from app.core.security import verify_password
 from app.models.domain import Domain
 from app.models.enums import UserRole
@@ -2211,7 +2235,7 @@ async def test_deactivated_status_also_deactivates_the_admin_record(sessionmaker
 async def test_unknown_admin_domain_is_rejected(sessionmaker_):
     await _seed_domain(sessionmaker_, "ad6.test")
     async with sessionmaker_() as session:
-        with pytest.raises(NotFoundError):
+        with pytest.raises(UnprocessableError):
             await provisioning_service.upsert_identity(
                 session,
                 "ad-6",
@@ -2302,7 +2326,7 @@ async def _converge_admin(
     for domain_name in payload.admin.domains:
         domain = await domain_service.get_by_name(db, domain_name)
         if domain is None:
-            raise NotFoundError(f"Domain {domain_name} is not hosted here.")
+            raise UnprocessableError(f"Domain {domain_name} is not hosted here.")
         domain.owner_id = user.id
 ```
 
@@ -2606,23 +2630,7 @@ Inside `_upsert_identity_inner`, immediately before the final `await db.commit()
 
 Note the no-op branch returns before reaching this, so an unchanged push writes no audit row.
 
-- [ ] **Step 5: Map `NotFoundError` from convergence to 422 where the spec requires it**
-
-The spec returns `422` for an unhosted domain, not `404`. Add a dedicated exception in `backend/app/core/exceptions.py`:
-
-```python
-class UnprocessableError(AppError):
-    """The request is well-formed but names something that cannot be used."""
-
-    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
-    code = "unprocessable"
-```
-
-Then in `provisioning_service.py`, replace the three domain-lookup failures (`Domain … is not hosted here`, `Alias domain … is not hosted here`, and the `admin.domains` one) with `UnprocessableError`, and the "no mailbox for aliases" `ConflictError` with `UnprocessableError`. Update the imports accordingly.
-
-Adjust `tests/test_provisioning_mailbox.py`, `tests/test_provisioning_aliases.py`, and `tests/test_provisioning_admin.py` to expect `UnprocessableError` instead of `NotFoundError` in exactly those cases. `get_identity` keeps raising `NotFoundError` — an unknown `external_id` really is a 404.
-
-- [ ] **Step 6: Write the routes**
+- [ ] **Step 5: Write the routes**
 
 Replace `backend/app/api/v1/provisioning.py` with:
 
@@ -2721,12 +2729,12 @@ async def get_identity(
 
 **Note on rate limiting:** the spec calls for reusing `app/core/ratelimit.py`. No work is needed — `limiter` is constructed with `default_limits=[f"{RATE_LIMIT_API_PER_MINUTE}/minute"]` (`ratelimit.py:12-17`), which applies app-wide, so provisioning routes inherit it automatically. Do not add a per-route decorator.
 
-- [ ] **Step 7: Run the full suite**
+- [ ] **Step 6: Run the full suite**
 
 Run: `cd backend && python -m pytest -q`
 Expected: PASS — every pre-existing test plus all new ones.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add backend/app/api/v1/provisioning.py backend/app/services/provisioning_service.py \
