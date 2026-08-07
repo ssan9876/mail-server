@@ -21,8 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, UnprocessableError
 from app.models.alias import Alias
+from app.models.domain import Domain
+from app.models.enums import UserRole
 from app.models.idm import IdmIdentity, IdmIdentityAlias
 from app.models.mailbox import Mailbox
+from app.models.user import User
 from app.schemas.provisioning import (
     UNUSABLE_PASSWORD_HASH,
     IdentityUpsert,
@@ -121,6 +124,8 @@ async def upsert_identity(
 
     _apply_lifecycle_stamp(identity, payload.status)
     identity.status = payload.status
+
+    await _converge_admin(db, identity, str(payload.email).lower(), payload)
 
     identity.last_payload_hash = payload_hash
     identity.last_synced_at = datetime.now(timezone.utc)
@@ -267,6 +272,57 @@ async def _converge_aliases(
         db.add(alias)
         await db.flush()
         db.add(IdmIdentityAlias(identity_id=identity.id, alias_id=alias.id))
+
+
+_ADMIN_ROLES = {
+    "superadmin": UserRole.SUPERADMIN,
+    "domain_admin": UserRole.DOMAIN_ADMIN,
+}
+
+
+async def _converge_admin(
+    db: AsyncSession, identity: IdmIdentity, email: str, payload: IdentityUpsert
+) -> None:
+    """Reconcile the control-plane user record.
+
+    Provisioned admins never get a usable password: they authenticate via SSO
+    in phase 2, and this row exists so an SSO login has something to resolve
+    to — the same shape the counterpart system's own console requires (a local
+    row plus a role grant before authorization works).
+    """
+    if "admin" not in payload.model_fields_set:
+        return
+
+    user: User | None = (
+        await db.get(User, identity.user_id) if identity.user_id is not None else None
+    )
+
+    if payload.admin is None:
+        # Deactivate, never delete: audit entries reference this row.
+        if user is not None:
+            user.is_active = False
+        return
+
+    if user is None:
+        user = User(
+            email=email,
+            password_hash=UNUSABLE_PASSWORD_HASH,
+            role=_ADMIN_ROLES[payload.admin.role],
+        )
+        db.add(user)
+        await db.flush()
+        identity.user_id = user.id
+    else:
+        user.email = email
+        user.role = _ADMIN_ROLES[payload.admin.role]
+
+    user.is_active = STATUS_ACTIVE_MAP[payload.status]
+
+    for domain_name in payload.admin.domains:
+        domain = await domain_service.get_by_name(db, domain_name)
+        if domain is None:
+            raise UnprocessableError(f"Domain {domain_name} is not hosted here.")
+        domain.owner_id = user.id
 
 
 def _apply_lifecycle_stamp(identity: IdmIdentity, status: str) -> None:
