@@ -1322,6 +1322,19 @@ def test_any_credential_field_is_rejected(field):
         IdentityUpsert(**_valid(**{field: "hunter2"}))
 
 
+def test_explicit_null_quota_is_rejected():
+    """quota_mb is NOT NULL in the database, so there is no cleared state.
+    Rejecting null beats silently treating it as absent, which would report
+    convergence while leaving the quota stale."""
+    with pytest.raises(ValidationError):
+        IdentityUpsert(**_valid(quota_mb=None))
+
+
+def test_omitted_quota_is_still_valid():
+    payload = IdentityUpsert(**_valid())
+    assert "quota_mb" not in payload.model_fields_set
+
+
 def test_unknown_field_is_rejected():
     with pytest.raises(ValidationError):
         IdentityUpsert(**_valid(department="Finance"))
@@ -1405,7 +1418,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 IdentityStatus = Literal["pending", "active", "suspended", "deactivated"]
 
@@ -1428,10 +1441,26 @@ class IdentityUpsert(BaseModel):
     username: str | None = Field(default=None, max_length=255)
     email: EmailStr
     display_name: str | None = Field(default=None, max_length=255)
+    # Optional but NOT nullable — see `_reject_null_quota` below.
     quota_mb: int | None = Field(default=None, ge=0, le=10_000_000)
     status: IdentityStatus
     aliases: list[str] | None = None
     admin: AdminSpec | None = None
+
+    @field_validator("quota_mb")
+    @classmethod
+    def _reject_null_quota(cls, value: int | None) -> int:
+        """`mailboxes.quota_mb` is NOT NULL, so there is no cleared state to
+        express. Omitting the field means "leave unchanged"; sending an
+        explicit null is rejected rather than silently treated as absent,
+        which would report convergence while leaving the quota stale.
+
+        Field validators do not run on defaults, so this fires only when the
+        caller actually supplied a value.
+        """
+        if value is None:
+            raise ValueError("quota_mb may be omitted, but not null.")
+        return value
 
 
 class IdentityRead(BaseModel):
@@ -1921,7 +1950,9 @@ async def _converge_mailbox(
 
     if "display_name" in fields_set:
         mailbox.display_name = payload.display_name
-    if "quota_mb" in fields_set and payload.quota_mb is not None:
+    if "quota_mb" in fields_set:
+        # No `is None` guard: the schema rejects an explicit null, so presence
+        # in fields_set means a real value was sent.
         mailbox.quota_mb = payload.quota_mb
     mailbox.is_active = is_active
 
