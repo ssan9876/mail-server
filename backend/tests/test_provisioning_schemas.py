@@ -121,6 +121,21 @@ def test_canonical_hash_distinguishes_absent_from_set_in_nested_admin():
     assert canonical_hash(absent_domains) != canonical_hash(explicit_empty)
 
 
+def test_explicit_null_quota_is_rejected():
+    """`mailboxes.quota_mb` is NOT NULL — there is no cleared state to
+    express, so an explicit null must fail validation rather than being
+    silently treated as absent (which would report convergence while leaving
+    the quota stale)."""
+    with pytest.raises(ValidationError):
+        IdentityUpsert(**_valid(quota_mb=None))
+
+
+def test_omitted_quota_is_valid_and_absent_from_fields_set():
+    payload = IdentityUpsert(**_valid())
+    assert payload.quota_mb is None
+    assert "quota_mb" not in payload.model_fields_set
+
+
 def test_canonical_hash_nested_admin_is_order_independent():
     """Verify that nested `AdminSpec` fields in different order hash
     identically."""

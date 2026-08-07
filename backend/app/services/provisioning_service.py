@@ -166,7 +166,9 @@ async def _converge_mailbox(
 
     if "display_name" in fields_set:
         mailbox.display_name = payload.display_name
-    if "quota_mb" in fields_set and payload.quota_mb is not None:
+    if "quota_mb" in fields_set:
+        # No `is None` guard: the schema rejects an explicit null, so presence
+        # in fields_set means a real value was sent.
         mailbox.quota_mb = payload.quota_mb
     mailbox.is_active = is_active
 

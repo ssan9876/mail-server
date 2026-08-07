@@ -1,8 +1,14 @@
 """Unscoped mailbox primitives used by provisioning."""
-import pytest
+from datetime import datetime, timezone
 
-from app.services import domain_service, mailbox_service
+import pytest
+from sqlalchemy import select
+
+from app.core.exceptions import ConflictError, NotFoundError, UnprocessableError
 from app.models.domain import Domain
+from app.models.mailbox import Mailbox
+from app.schemas.provisioning import UNUSABLE_PASSWORD_HASH, IdentityUpsert
+from app.services import domain_service, mailbox_service, provisioning_service
 
 
 @pytest.mark.asyncio
@@ -55,17 +61,6 @@ async def test_domain_get_by_name(sessionmaker_):
         found = await domain_service.get_by_name(session, "acme3.example.com")
         assert found is not None and found.name == "acme3.example.com"
         assert await domain_service.get_by_name(session, "nope.example.com") is None
-
-
-from datetime import datetime, timezone
-
-from app.models.domain import Domain
-from app.models.mailbox import Mailbox
-from app.schemas.provisioning import UNUSABLE_PASSWORD_HASH, IdentityUpsert
-from app.services import provisioning_service
-from app.core.exceptions import ConflictError, NotFoundError, UnprocessableError
-from sqlalchemy import select
-import pytest
 
 
 async def _seed_domain(sessionmaker_, name="corp.example.com"):
@@ -176,6 +171,30 @@ async def test_rename_onto_an_existing_address_conflicts(sessionmaker_):
             await provisioning_service.upsert_identity(
                 session, "ext-6b", _payload(email="taken@clash.example.com")
             )
+
+
+@pytest.mark.asyncio
+async def test_first_time_push_conflict_leaves_no_dangling_identity(sessionmaker_):
+    """A conflict on a brand-new `external_id`'s very first push must not
+    leave a dangling `IdmIdentity` row behind. `upsert_identity` flushes a new
+    identity before `_converge_mailbox` can raise `ConflictError`; this proves
+    the failed attempt's uncommitted transaction is fully discarded rather
+    than leaving an orphaned row with no mailbox."""
+    await _seed_domain(sessionmaker_, "firstclash.example.com")
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session, "ext-13a", _payload(email="taken@firstclash.example.com")
+        )
+
+    async with sessionmaker_() as session:
+        with pytest.raises(ConflictError):
+            await provisioning_service.upsert_identity(
+                session, "ext-13b", _payload(email="taken@firstclash.example.com")
+            )
+
+    async with sessionmaker_() as session:
+        with pytest.raises(NotFoundError):
+            await provisioning_service.get_identity(session, "ext-13b")
 
 
 @pytest.mark.asyncio

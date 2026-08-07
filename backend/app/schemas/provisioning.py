@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 IdentityStatus = Literal["pending", "active", "suspended", "deactivated"]
 
@@ -42,6 +42,21 @@ class IdentityUpsert(BaseModel):
     status: IdentityStatus
     aliases: list[str] | None = None
     admin: AdminSpec | None = None
+
+    @field_validator("quota_mb")
+    @classmethod
+    def _reject_null_quota(cls, value: int | None) -> int:
+        """`mailboxes.quota_mb` is NOT NULL, so there is no cleared state to
+        express. Omitting the field means "leave unchanged"; sending an
+        explicit null is rejected rather than silently treated as absent,
+        which would report convergence while leaving the quota stale.
+
+        Field validators do not run on defaults, so this fires only when the
+        caller actually supplied a value.
+        """
+        if value is None:
+            raise ValueError("quota_mb may be omitted, but not null.")
+        return value
 
 
 class IdentityRead(BaseModel):
