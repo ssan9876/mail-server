@@ -451,3 +451,48 @@ mail administration. The phase 2 spec should decide whether the bootstrap
 `ADMIN_EMAIL` / `ADMIN_PASSWORD` superadmin (`app/core/config.py:50`) stays
 password-capable as break-glass access. Recorded here so the decision is not
 lost; it is not a phase 1 decision.
+
+## Known issues carried forward
+
+Found during implementation review and deliberately accepted, not fixed. Each
+bounds a guarantee stated above, so anyone building phase 2 or the connector
+should read this section alongside the failure table.
+
+**Convergence is not self-healing against out-of-band drift.** The no-op short
+circuit (step 4 of the convergence algorithm) returns before mailbox, alias and
+admin convergence run. So if an operator re-enables a user the IdM deactivated —
+through the dashboard, or directly in the database — an identical re-push will
+match `last_payload_hash`, short-circuit, and never re-revoke. The IdM's
+reconciliation job cannot repair drift it cannot see. Closing this means either
+verifying observed state before the short circuit, or having the connector send
+a periodic force-converge that bypasses the hash.
+
+**Concurrent pushes for one identity are not serialised.** The row lock is
+deferred (see the note in the convergence algorithm). Until it lands, exactly
+one connector worker may target this mail server at a time. Nothing in code or
+deployment configuration enforces that precondition.
+
+**Domain ownership cannot express shared administration.** `Domain.owner_id` is
+single-valued while `admin.domains` is a per-user list, so two identities that
+both claim one domain will alternate ownership on every reconcile pass, each
+push revoking the other's access. Ownership is also add-only: dropping a domain
+from `admin.domains` does not release it. Representing shared administration
+needs a join table, which is a schema change beyond this phase.
+
+**IdM-owned aliases stay active when their identity is deactivated.** Only the
+destination mailbox is deactivated. Delivery still fails, because the alias
+forwards to an inactive mailbox — but the alias continues to match, which
+suppresses the domain catch-all for that address.
+
+**Provisioning has no application-level rate limit.** The routes are blocked at
+the Nginx edge, so nginx's limiter never sees them, and no `@limiter.limit`
+decorator is applied. Low practical risk given 256-bit service tokens on an
+internal network, but it is not the defence-in-depth the Security section might
+imply.
+
+**Convergence is tested only on SQLite.** The migration tests run against real
+PostgreSQL, but every service-layer test uses SQLite, which ignores `VARCHAR`
+lengths and does not enforce `ON DELETE CASCADE` in this fixture. Length-overflow
+and cascade behaviour are therefore reasoned rather than observed. Any value that
+can exceed its column width surfaces as a `DataError` → 500, which the connector
+treats as retriable and will retry indefinitely.
