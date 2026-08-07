@@ -6,9 +6,34 @@ provisioning API must not be reachable from the internet.
 """
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DOVECOT_SQL = REPO_ROOT / "docker" / "dovecot" / "dovecot-sql.conf.ext.tmpl"
-NGINX_HTTPS = REPO_ROOT / "docker" / "nginx" / "templates" / "10-https.conf.template"
+import pytest
+
+
+def _find_repo_root() -> Path | None:
+    """Walk upward for the directory containing `docker/dovecot`.
+
+    Hardcoding a parent depth breaks under a backend-only bind mount, where
+    these files are outside the container entirely — and fails with a bare
+    FileNotFoundError rather than saying why.
+    """
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "docker" / "dovecot").is_dir():
+            return candidate
+    return None
+
+
+REPO_ROOT = _find_repo_root()
+
+pytestmark = pytest.mark.skipif(
+    REPO_ROOT is None,
+    reason=(
+        "Mail daemon config is outside this mount. Run with the repo root "
+        "mounted: -v \"D:/mail-server:/repo\" -w /repo/backend"
+    ),
+)
+
+DOVECOT_SQL = REPO_ROOT / "docker" / "dovecot" / "dovecot-sql.conf.ext.tmpl" if REPO_ROOT else None
+NGINX_HTTPS = REPO_ROOT / "docker" / "nginx" / "templates" / "10-https.conf.template" if REPO_ROOT else None
 
 
 def test_dovecot_reads_maildir_path_rather_than_deriving_it():
