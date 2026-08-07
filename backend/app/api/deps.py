@@ -86,6 +86,25 @@ async def get_current_mailbox(
     return mailbox
 
 
+async def require_service_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    db: DbDep,
+):
+    """Authenticate the IdM connector.
+
+    Entirely separate from `get_current_user`: a service token is not a JWT, so
+    an operator credential can never satisfy a provisioning endpoint and a
+    provisioning token can never satisfy an operator one — the same isolation
+    already enforced between user and mailbox principals, but structural rather
+    than claim-based.
+    """
+    from app.services import idm_token_service
+
+    if credentials is None:
+        raise PermissionDeniedError("Service token required.")
+    return await idm_token_service.verify_token(db, credentials.credentials)
+
+
 def require_roles(*roles: UserRole) -> Callable[[User], Awaitable[User]]:
     """Dependency factory enforcing that the current user has one of `roles`."""
 
