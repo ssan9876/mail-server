@@ -340,10 +340,11 @@ depends_on: Union[str, Sequence[str], None] = None
 _UUID_DEFAULT = sa.text("gen_random_uuid()")
 _NOW = sa.text("now()")
 
-# actor_type is VARCHAR + CHECK (native_enum=False), so widening it means
-# dropping and recreating the constraint rather than an ALTER TYPE.
-_OLD_ACTORS = "'user', 'mailbox', 'system'"
-_NEW_ACTORS = "'user', 'mailbox', 'system', 'idm'"
+# NOTE: adding `idm` to ActorType needs NO schema change. SQLAlchemy's
+# `Enum(..., native_enum=False)` defaults to `create_constraint=False`, so
+# `audit_logs.actor_type` is a plain VARCHAR(20) with no CHECK constraint to
+# widen — verified by compiling the 0001 table definition. Validation is
+# Python-side (`validate_strings=True`), and 'idm' fits the existing column.
 
 
 def upgrade() -> None:
@@ -414,27 +415,15 @@ def upgrade() -> None:
         ),
     )
 
-    # SQLite cannot drop a CHECK constraint; tests build the schema with
-    # create_all rather than migrations, so skipping there is correct.
-    bind = op.get_bind()
-    if bind.dialect.name == "postgresql":
-        op.drop_constraint("ck_audit_logs_actortype", "audit_logs", type_="check")
-        op.create_check_constraint(
-            "actortype", "audit_logs", f"actor_type IN ({_NEW_ACTORS})"
-        )
+    # No actor_type work here — see the module note above.
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    if bind.dialect.name == "postgresql":
-        # Any 'idm' rows would violate the narrowed constraint. Audit logs are
-        # append-only and must not be deleted, so they are relabelled 'system'
-        # — the closest surviving value — rather than dropped.
-        op.execute("UPDATE audit_logs SET actor_type = 'system' WHERE actor_type = 'idm'")
-        op.drop_constraint("ck_audit_logs_actortype", "audit_logs", type_="check")
-        op.create_check_constraint(
-            "actortype", "audit_logs", f"actor_type IN ({_OLD_ACTORS})"
-        )
+    # 'idm' is not a member of ActorType after this migration is reversed, and
+    # the column's Python-side validation would raise when loading such a row.
+    # Audit logs are append-only and must never be deleted, so existing rows
+    # are relabelled to 'system' — the closest surviving value — not dropped.
+    op.execute("UPDATE audit_logs SET actor_type = 'system' WHERE actor_type = 'idm'")
 
     op.drop_table("idm_identity_aliases")
     op.drop_index("ix_idm_identities_external_id", table_name="idm_identities")
@@ -443,18 +432,163 @@ def downgrade() -> None:
     op.drop_table("idm_service_tokens")
 ```
 
-- [ ] **Step 8: Verify the whole suite still passes**
+- [ ] **Step 8: Write the migration test**
 
-Run: `cd backend && python -m pytest -q`
-Expected: PASS — all pre-existing tests plus the 5 new ones.
+The SQLite suite builds schema with `Base.metadata.create_all` and never invokes Alembic, so nothing here exercises the migration. That gap is exactly how a migration that crashed on Postgres reached review. This test closes it.
 
-- [ ] **Step 9: Commit**
+`alembic/env.py:21` overwrites `sqlalchemy.url` from `settings.DATABASE_URL`, and `settings` is a cached singleton built at import. Setting the URL in an in-process `Config` therefore has no effect — the test must run Alembic as a subprocess with `POSTGRES_*` env overrides, which is also how it runs for real in `entrypoint.sh`.
+
+Create `backend/tests/test_migrations.py`:
+
+```python
+"""Alembic migrations against a real PostgreSQL database.
+
+Skipped unless TEST_MIGRATION_DSN is set — see the module docstring's run
+instructions. The rest of the suite builds schema with `create_all` on SQLite
+and never invokes Alembic, so this is the only coverage the migrations have.
+
+Run it with a disposable Postgres:
+
+    docker network create mailtest-net
+    docker run -d --name mailtest-pg --network mailtest-net \\
+        -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=mailtest \\
+        postgres:16
+    docker run --rm --network mailtest-net --entrypoint python \\
+        -v "D:/mail-server/backend:/app" \\
+        -e TEST_MIGRATION_DSN=postgresql://test:test@mailtest-pg:5432/mailtest \\
+        mail-server-backend-dev -m pytest tests/test_migrations.py -v
+    docker rm -f mailtest-pg && docker network rm mailtest-net
+"""
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.engine.url import make_url
+
+DSN = os.getenv("TEST_MIGRATION_DSN")
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+
+IDM_TABLES = {"idm_service_tokens", "idm_identities", "idm_identity_aliases"}
+
+pytestmark = pytest.mark.skipif(
+    not DSN,
+    reason="Set TEST_MIGRATION_DSN to a disposable PostgreSQL to run migration tests.",
+)
+
+
+def _subprocess_env() -> dict[str, str]:
+    """Alembic reads the URL from Settings, so override the pieces it builds from."""
+    url = make_url(DSN)
+    return {
+        **os.environ,
+        "POSTGRES_HOST": url.host or "localhost",
+        "POSTGRES_PORT": str(url.port or 5432),
+        "POSTGRES_DB": url.database or "postgres",
+        "POSTGRES_USER": url.username or "postgres",
+        "POSTGRES_PASSWORD": url.password or "",
+    }
+
+
+def _alembic(*args: str) -> None:
+    result = subprocess.run(
+        ["alembic", *args],
+        cwd=BACKEND_DIR,
+        env=_subprocess_env(),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"`alembic {' '.join(args)}` failed with {result.returncode}\n"
+        f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+    )
+
+
+def _table_names() -> set[str]:
+    engine = create_engine(DSN)
+    try:
+        return set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _clean_database():
+    """Every test starts from an empty database."""
+    _alembic("downgrade", "base")
+    yield
+    _alembic("downgrade", "base")
+
+
+def test_upgrade_to_head_creates_the_idm_tables():
+    _alembic("upgrade", "head")
+    assert IDM_TABLES <= _table_names()
+
+
+def test_downgrade_removes_the_idm_tables():
+    _alembic("upgrade", "head")
+    _alembic("downgrade", "base")
+    assert IDM_TABLES.isdisjoint(_table_names())
+
+
+def test_migrations_are_reversible_and_repeatable():
+    """upgrade -> downgrade -> upgrade must land in the same place. A migration
+    that only works on a fresh database is not reversible."""
+    _alembic("upgrade", "head")
+    first = _table_names()
+    _alembic("downgrade", "base")
+    _alembic("upgrade", "head")
+    assert _table_names() == first
+
+
+def test_idm_actor_type_is_accepted_by_the_audit_log():
+    """The reason no schema change is needed for ActorType.IDM: actor_type is a
+    plain VARCHAR with no CHECK constraint. Prove it against real Postgres
+    rather than trusting the claim."""
+    _alembic("upgrade", "head")
+    engine = create_engine(DSN)
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "INSERT INTO audit_logs (action, actor_type) VALUES ('t.est', 'idm')"
+            )
+            value = conn.exec_driver_sql(
+                "SELECT actor_type FROM audit_logs WHERE action = 't.est'"
+            ).scalar_one()
+        assert value == "idm"
+    finally:
+        engine.dispose()
+```
+
+- [ ] **Step 9: Run the migration test against a disposable Postgres**
+
+```bash
+docker network create mailtest-net
+docker run -d --name mailtest-pg --network mailtest-net \
+    -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=mailtest postgres:16
+# wait a few seconds for Postgres to accept connections
+docker run --rm --network mailtest-net --entrypoint python \
+    -v "D:/mail-server/backend:/app" \
+    -e TEST_MIGRATION_DSN=postgresql://test:test@mailtest-pg:5432/mailtest \
+    mail-server-backend-dev -m pytest tests/test_migrations.py -v
+docker rm -f mailtest-pg && docker network rm mailtest-net
+```
+
+Expected: 4 passed. If `alembic upgrade head` fails, the migration is broken — fix it before continuing, and do not mark this step complete.
+
+- [ ] **Step 10: Verify the whole suite still passes**
+
+Run the full suite per the Global Constraints Docker command.
+Expected: PASS — all pre-existing tests plus the 5 new model tests. `test_migrations.py` reports 4 skipped without `TEST_MIGRATION_DSN`, which is correct.
+
+- [ ] **Step 11: Commit**
 
 ```bash
 git add backend/app/models/idm.py backend/app/models/enums.py \
         backend/app/models/__init__.py \
         backend/alembic/versions/20260806_0003_idm_sync.py \
-        backend/tests/test_idm_models.py
+        backend/tests/test_idm_models.py backend/tests/test_migrations.py
 git commit -m "feat(idm): add service token, identity link, and alias-ownership tables"
 ```
 
