@@ -155,6 +155,24 @@ async def test_catch_all_shaped_alias_is_422_over_http(client, svc):
 
 
 @pytest.mark.asyncio
+async def test_over_long_alias_local_part_is_422_over_http(client, svc):
+    """Whitespace before the `@` used to smuggle a 65-character local part into
+    `aliases.local_part`, which is `String(64)` — `DataError` -> 500 on
+    Postgres, retried forever by the connector. SQLite ignores VARCHAR width,
+    so this asserts the API-level rejection."""
+    resp = await client.put(
+        "/api/v1/provisioning/identities/ext-113",
+        json={
+            "email": "jane@api.example.com",
+            "status": "active",
+            "aliases": ["x" * 64 + " @api.example.com"],
+        },
+        headers=svc,
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
 async def test_get_returns_state_and_404s_for_unknown(client, svc):
     await client.put(
         "/api/v1/provisioning/identities/ext-105",

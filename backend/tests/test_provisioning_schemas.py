@@ -177,6 +177,47 @@ def test_ordinary_alias_addresses_are_accepted(alias):
     assert IdentityUpsert(**_valid(aliases=[alias])).aliases == [alias]
 
 
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "jane @acme.example.com",
+        "jane	@acme.example.com",
+        "jane@ acme.example.com",
+        " j.doe 	@acme.example.com",
+    ],
+)
+def test_whitespace_around_the_at_sign_is_rejected(alias):
+    """What is validated must be what gets stored.
+
+    `_validate_local_part` strips internally before matching and
+    `_split_address` strips only the whole address, so a local part's own
+    trailing space passed validation and then landed in the database — an
+    address Postfix can never match.
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        IdentityUpsert(**_valid(aliases=[alias]))
+    assert repr(alias) in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "x" * 65 + "@acme.example.com",
+        "x" * 64 + " @acme.example.com",
+        " " + "x" * 65 + "@acme.example.com",
+    ],
+)
+def test_over_long_local_part_is_422_not_a_database_error(alias):
+    """`Alias.local_part` is `String(64)`. Whitespace before the `@` used to
+    smuggle a 65-character local part past the regex (which strips first) and
+    into the column, where Postgres raises `DataError` -> 500 and the connector
+    retries a permanently-broken request forever — the exact failure mode the
+    `external_id` bound was added to eliminate. SQLite ignores VARCHAR width,
+    so nothing but this check catches it."""
+    with pytest.raises(ValidationError):
+        IdentityUpsert(**_valid(aliases=[alias]))
+
+
 def test_one_bad_entry_rejects_the_whole_alias_list():
     with pytest.raises(ValidationError):
         IdentityUpsert(

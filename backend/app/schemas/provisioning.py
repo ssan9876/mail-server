@@ -47,11 +47,26 @@ def _validate_alias_address(address: str) -> str:
     into one mailbox. The local part is held to `_LOCAL_PART_RE`, the same
     conservative subset the admin-facing mailbox and alias schemas use, which
     excludes `@` and the empty string by construction.
+
+    Whitespace around the `@` is rejected outright rather than trimmed, because
+    what is validated here must be what gets STORED. `_validate_local_part`
+    strips internally before matching, and `_split_address` strips only the
+    whole address — so a local part's own trailing space survived both and
+    landed in the database. That produced an alias Postfix can never match
+    (`'jane '`), and, worse, let `"x" * 64 + " @d"` through as a "64-character"
+    local part that is 65 characters once stored: `Alias.local_part` is
+    `String(64)`, so Postgres raises `DataError` -> 500 and the connector
+    retries a permanently-broken request forever. SQLite ignores VARCHAR width,
+    so only this check catches it.
     """
     local_part, separator, domain_part = address.strip().rpartition("@")
     if not separator or not domain_part:
         raise ValueError(
             f"Invalid alias {address!r}: expected a local@domain address."
+        )
+    if local_part != local_part.strip() or domain_part != domain_part.strip():
+        raise ValueError(
+            f"Invalid alias {address!r}: whitespace around the @ is not allowed."
         )
     try:
         _validate_local_part(local_part)
