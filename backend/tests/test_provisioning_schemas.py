@@ -86,3 +86,48 @@ def test_unusable_password_hash_cannot_be_authenticated_against():
     for candidate in ["", "password", UNUSABLE_PASSWORD_HASH, "!"]:
         assert verify_password(candidate, UNUSABLE_PASSWORD_HASH) is False
         assert verify_dovecot(candidate, UNUSABLE_PASSWORD_HASH) is False
+
+
+@pytest.mark.parametrize(
+    "field", ["password", "password_hash", "credential", "secret", "passwd"]
+)
+def test_any_credential_field_nested_in_admin_is_rejected(field):
+    """Nested smuggling: `extra="forbid"` inside `AdminSpec` must reject
+    credential-shaped fields nested deep."""
+    with pytest.raises(ValidationError):
+        IdentityUpsert(
+            **_valid(admin={"role": "domain_admin", field: "hunter2"})
+        )
+
+
+def test_unknown_field_nested_in_admin_is_rejected():
+    """Verify `extra="forbid"` on `AdminSpec` rejects non-credential unknown
+    fields too, so it's not a name-specific rule."""
+    with pytest.raises(ValidationError):
+        IdentityUpsert(
+            **_valid(admin={"role": "domain_admin", "department": "Finance"})
+        )
+
+
+def test_canonical_hash_distinguishes_absent_from_set_in_nested_admin():
+    """Nested `exclude_unset=True` behavior: `admin` with `domains` from
+    `default_factory` must hash differently from explicit empty list."""
+    absent_domains = IdentityUpsert(
+        **_valid(admin={"role": "domain_admin"})
+    )
+    explicit_empty = IdentityUpsert(
+        **_valid(admin={"role": "domain_admin", "domains": []})
+    )
+    assert canonical_hash(absent_domains) != canonical_hash(explicit_empty)
+
+
+def test_canonical_hash_nested_admin_is_order_independent():
+    """Verify that nested `AdminSpec` fields in different order hash
+    identically."""
+    a = IdentityUpsert(
+        **_valid(admin={"role": "superadmin", "domains": ["acme.com"]})
+    )
+    b = IdentityUpsert(
+        **_valid(admin={"domains": ["acme.com"], "role": "superadmin"})
+    )
+    assert canonical_hash(a) == canonical_hash(b)
