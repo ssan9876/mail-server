@@ -2212,7 +2212,7 @@ async def _converge_aliases(
             )
             await db.delete(alias)
 
-    for (domain_id, alias_local), _address in desired.items():
+    for (domain_id, alias_local), address in desired.items():
         existing = owned_by_key.get((domain_id, alias_local))
         if existing is not None:
             existing.destination = destination
@@ -2227,10 +2227,10 @@ async def _converge_aliases(
         ).scalar_one_or_none()
         if clash is not None:
             raise ConflictError(
-                f"{alias_local}@… already exists and is not managed by the IdM."
+                f"{address} already exists and is not managed by the IdM."
             )
         if await mailbox_service.local_part_taken(db, domain_id, alias_local):
-            raise ConflictError(f"{alias_local}@… already exists (mailbox or alias).")
+            raise ConflictError(f"{address} already exists (mailbox or alias).")
 
         alias = Alias(
             domain_id=domain_id, local_part=alias_local, destination=destination
