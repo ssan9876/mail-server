@@ -2,13 +2,14 @@
 import pytest
 from sqlalchemy import select
 
-from app.core.exceptions import UnprocessableError
+from app.core.exceptions import ConflictError, UnprocessableError
 from app.core.security import verify_password
 from app.models.domain import Domain
 from app.models.enums import UserRole
+from app.models.idm import IdmIdentity
 from app.models.user import User
 from app.schemas.provisioning import UNUSABLE_PASSWORD_HASH, IdentityUpsert
-from app.services import provisioning_service
+from app.services import provisioning_service, user_service
 
 
 async def _seed_domain(sessionmaker_, name):
@@ -119,7 +120,9 @@ async def test_deactivated_status_also_deactivates_the_admin_record(sessionmaker
 async def test_unknown_admin_domain_is_rejected(sessionmaker_):
     await _seed_domain(sessionmaker_, "ad6.example.com")
     async with sessionmaker_() as session:
-        with pytest.raises(UnprocessableError):
+        # The message must name the specific domain: it is what an operator
+        # sees when triaging a dead-lettered sync event.
+        with pytest.raises(UnprocessableError, match="nope.example.com"):
             await provisioning_service.upsert_identity(
                 session,
                 "ad-6",
@@ -143,3 +146,108 @@ async def test_a_rename_moves_the_admin_email(sessionmaker_):
         )
         user = await session.get(User, identity.user_id)
         assert user.email == "jane.doe@ad7.example.com"
+
+
+@pytest.mark.asyncio
+async def test_admin_email_collision_with_a_non_idm_user_is_rejected(sessionmaker_):
+    """`users.email` is unique, and not every row is IdM-managed.
+
+    The bootstrap superadmin (and any operator created by hand) has a `users`
+    row with no mailbox at all, so `_converge_mailbox`'s local_part/alias
+    check never sees it — a colliding admin push would otherwise sail past
+    that check and hit the raw unique constraint on `users.email` directly.
+    """
+    domain = await _seed_domain(sessionmaker_, "ad8.example.com")
+    async with sessionmaker_() as session:
+        await user_service.create_user(
+            session, email="jane@ad8.example.com", password="not-usable-by-the-idm"
+        )
+
+    async with sessionmaker_() as session:
+        with pytest.raises(ConflictError, match="jane@ad8.example.com"):
+            await provisioning_service.upsert_identity(
+                session,
+                "ad-8",
+                _payload(
+                    "jane@ad8.example.com",
+                    admin={"role": "domain_admin", "domains": ["ad8.example.com"]},
+                ),
+            )
+
+    async with sessionmaker_() as session:
+        users = (
+            await session.execute(select(User).where(User.email == "jane@ad8.example.com"))
+        ).scalars().all()
+        assert len(users) == 1, "no duplicate/partial user row from the failed push"
+        owned = await session.get(Domain, domain.id)
+        assert owned.owner_id is None, "domain ownership must not have been applied"
+
+
+@pytest.mark.asyncio
+async def test_422_on_unknown_admin_domain_leaves_the_database_unchanged(sessionmaker_):
+    await _seed_domain(sessionmaker_, "ad10.example.com")
+    async with sessionmaker_() as session:
+        with pytest.raises(UnprocessableError):
+            await provisioning_service.upsert_identity(
+                session,
+                "ad-10",
+                _payload(
+                    "jane@ad10.example.com",
+                    admin={
+                        "role": "domain_admin",
+                        # A known domain first, so the loop applies it in
+                        # memory before the unknown one aborts the call.
+                        "domains": ["ad10.example.com", "nope.example.com"],
+                    },
+                ),
+            )
+
+    async with sessionmaker_() as session:
+        users = (await session.execute(select(User))).scalars().all()
+        assert users == [], "no half-created user row must survive a 422"
+        owned = (
+            await session.execute(
+                select(Domain).where(Domain.name == "ad10.example.com")
+            )
+        ).scalar_one()
+        assert owned.owner_id is None, "domain ownership must not have been partially applied"
+
+
+@pytest.mark.asyncio
+async def test_domain_reassignment_from_another_owner_is_reported(sessionmaker_):
+    """Domain ownership is last-write-wins by deliberate ruling, but never
+    silently: `_converge_admin` reports every reassignment it performs so
+    Task 8 can fold it into the audit entry."""
+    domain = await _seed_domain(sessionmaker_, "ad9.example.com")
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session,
+            "ad-9a",
+            _payload(
+                "alice@ad9.example.com",
+                admin={"role": "domain_admin", "domains": ["ad9.example.com"]},
+            ),
+        )
+
+    async with sessionmaker_() as session:
+        alice = await user_service.get_by_email(session, "alice@ad9.example.com")
+
+        identity_b = IdmIdentity(external_id="ad-9b")
+        session.add(identity_b)
+        await session.flush()
+
+        reassigned = await provisioning_service._converge_admin(
+            session,
+            identity_b,
+            "bob@ad9.example.com",
+            _payload(
+                "bob@ad9.example.com",
+                admin={"role": "domain_admin", "domains": ["ad9.example.com"]},
+            ),
+        )
+
+        assert reassigned == [{"domain": "ad9.example.com", "from": str(alice.id)}]
+
+        owned = await session.get(Domain, domain.id)
+        assert owned.owner_id == identity_b.user_id
+        assert owned.owner_id != alice.id

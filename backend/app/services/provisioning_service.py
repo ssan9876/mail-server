@@ -31,7 +31,7 @@ from app.schemas.provisioning import (
     IdentityUpsert,
     canonical_hash,
 )
-from app.services import domain_service, mailbox_service
+from app.services import domain_service, mailbox_service, user_service
 
 # The IdM's four lifecycle values, mapped to mailbox reachability. Only
 # `active` is a live principal — mirroring how the counterpart system treats
@@ -125,7 +125,8 @@ async def upsert_identity(
     _apply_lifecycle_stamp(identity, payload.status)
     identity.status = payload.status
 
-    await _converge_admin(db, identity, str(payload.email).lower(), payload)
+    # Task 8 folds this into the audit entry; nothing consumes it yet.
+    reassigned_domains = await _converge_admin(db, identity, str(payload.email).lower(), payload)
 
     identity.last_payload_hash = payload_hash
     identity.last_synced_at = datetime.now(timezone.utc)
@@ -282,16 +283,22 @@ _ADMIN_ROLES = {
 
 async def _converge_admin(
     db: AsyncSession, identity: IdmIdentity, email: str, payload: IdentityUpsert
-) -> None:
+) -> list[dict]:
     """Reconcile the control-plane user record.
 
     Provisioned admins never get a usable password: they authenticate via SSO
     in phase 2, and this row exists so an SSO login has something to resolve
     to — the same shape the counterpart system's own console requires (a local
     row plus a role grant before authorization works).
+
+    Returns the domain ownership reassignments this call performed, each as
+    `{"domain": <name>, "from": <previous owner id, or None>}` — Task 8 folds
+    this into the audit entry so a silent takeover is never actually silent.
     """
+    reassigned_domains: list[dict] = []
+
     if "admin" not in payload.model_fields_set:
-        return
+        return reassigned_domains
 
     user: User | None = (
         await db.get(User, identity.user_id) if identity.user_id is not None else None
@@ -301,7 +308,22 @@ async def _converge_admin(
         # Deactivate, never delete: audit entries reference this row.
         if user is not None:
             user.is_active = False
-        return
+        return reassigned_domains
+
+    # `users.email` is unique, but not every row is IdM-managed — e.g. the
+    # bootstrap superadmin has a `users` row with no mailbox at all, so
+    # `_converge_mailbox`'s local_part/alias check never sees it and a
+    # colliding push would sail past it. Catch the collision here, before
+    # touching the row, so it surfaces as a dead-letterable ConflictError
+    # naming the address rather than a raw unique-constraint IntegrityError
+    # that the IdM connector would retry forever.
+    existing_by_email = await user_service.get_by_email(db, email)
+    if existing_by_email is not None and (
+        user is None or existing_by_email.id != user.id
+    ):
+        raise ConflictError(
+            f"{email} is already an operator account not managed by the IdM."
+        )
 
     if user is None:
         user = User(
@@ -318,11 +340,31 @@ async def _converge_admin(
 
     user.is_active = STATUS_ACTIVE_MAP[payload.status]
 
+    # Domain ownership is last-write-wins, by deliberate ruling: the IdM is
+    # the source of truth for who administers what, so a push naming a domain
+    # another admin currently owns MAY reassign it. Two identities that
+    # alternate naming the same domain will legitimately ping-pong ownership
+    # back and forth — that is accepted, not a bug to guard against. What is
+    # NOT accepted is doing it silently, hence the return value below.
+    #
+    # Ownership here is also add-only within a single call: there is no "this
+    # identity no longer administers X" signal in `admin.domains`, so a domain
+    # dropped from the list is simply never revisited — it stays with whoever
+    # holds it.
     for domain_name in payload.admin.domains:
         domain = await domain_service.get_by_name(db, domain_name)
         if domain is None:
             raise UnprocessableError(f"Domain {domain_name} is not hosted here.")
+        if domain.owner_id != user.id:
+            reassigned_domains.append(
+                {
+                    "domain": domain.name,
+                    "from": str(domain.owner_id) if domain.owner_id else None,
+                }
+            )
         domain.owner_id = user.id
+
+    return reassigned_domains
 
 
 def _apply_lifecycle_stamp(identity: IdmIdentity, status: str) -> None:
