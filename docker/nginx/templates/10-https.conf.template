@@ -28,6 +28,14 @@ server {
         proxy_pass http://backend:8000;
     }
 
+    # --- IdM provisioning: internal network only -----------------------------
+    # Service-token authenticated and reachable only from inside the Docker
+    # network, so a leaked token is useless from the internet. Longest-prefix
+    # matching means this wins over `location /api/`.
+    location /api/v1/provisioning/ {
+        return 404;
+    }
+
     # --- General API ----------------------------------------------------------
     location /api/ {
         limit_req zone=api burst=20 nodelay;
