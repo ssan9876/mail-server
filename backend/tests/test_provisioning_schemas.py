@@ -136,6 +136,89 @@ def test_omitted_quota_is_valid_and_absent_from_fields_set():
     assert "quota_mb" not in payload.model_fields_set
 
 
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "@@acme.example.com",
+        "@acme.example.com",
+        "no-at-sign",
+        "",
+        "jane@",
+        "jane doe@acme.example.com",
+        "jane/doe@acme.example.com",
+        ".jane@acme.example.com",
+        "jane.@acme.example.com",
+    ],
+)
+def test_malformed_alias_is_rejected_and_named(alias):
+    """`_split_address` splits on the LAST `@`, so `"@@acme.example.com"`
+    yields a local part of `"@"` — precisely the domain catch-all convention
+    `docker/postfix/pgsql/virtual_alias_catchall.cf` matches. One typo would
+    route every unrouted address in the domain into a single mailbox, with
+    nothing in the audit trail marking it as different from a normal alias.
+    The error must also name the offending entry: it is what the operator sees
+    when triaging the dead-lettered event.
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        IdentityUpsert(**_valid(aliases=[alias]))
+    assert repr(alias) in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "j.doe@acme.example.com",
+        "j+tag@acme.example.com",
+        "j_d-1@acme.example.com",
+        "jane@sub.acme.example.com",
+    ],
+)
+def test_ordinary_alias_addresses_are_accepted(alias):
+    assert IdentityUpsert(**_valid(aliases=[alias])).aliases == [alias]
+
+
+def test_one_bad_entry_rejects_the_whole_alias_list():
+    with pytest.raises(ValidationError):
+        IdentityUpsert(
+            **_valid(aliases=["good@acme.example.com", "@@acme.example.com"])
+        )
+
+
+def test_explicit_null_aliases_is_rejected():
+    """`[]` already expresses "remove all IdM-owned aliases", so null is
+    redundant rather than a third meaning. Accepted, it would be a silent
+    divergence: present in `model_fields_set`, hashing as a distinct payload,
+    advancing `last_synced_at` and writing a success audit row — while
+    changing nothing. Same ruling as `quota_mb`."""
+    with pytest.raises(ValidationError):
+        IdentityUpsert(**_valid(aliases=None))
+
+
+def test_omitted_aliases_is_valid_and_absent_from_fields_set():
+    payload = IdentityUpsert(**_valid())
+    assert payload.aliases is None
+    assert "aliases" not in payload.model_fields_set
+
+
+def test_empty_alias_list_is_valid_and_present_in_fields_set():
+    payload = IdentityUpsert(**_valid(aliases=[]))
+    assert payload.aliases == []
+    assert "aliases" in payload.model_fields_set
+
+
+def test_unusable_password_hash_names_an_unmatchable_scheme():
+    """Dovecot reads `mailboxes.password_hash` directly and interprets a
+    prefix-less value under `default_pass_scheme`. A bare placeholder is inert
+    only by accident — it fails today because Dovecot 2.3 defaults to MD5 and
+    the string is not valid MD5, but `default_pass_scheme = PLAIN` (plausible
+    once app passwords arrive) would turn it into a working password shared by
+    every active provisioned mailbox. An explicit scheme prefix removes the
+    dependency on that setting entirely, and `*` is the conventional crypt(3)
+    "no password" marker that no crypt implementation can produce."""
+    assert UNUSABLE_PASSWORD_HASH.startswith("{CRYPT}")
+    assert UNUSABLE_PASSWORD_HASH[len("{CRYPT}")] == "*"
+
+
 def test_canonical_hash_nested_admin_is_order_independent():
     """Verify that nested `AdminSpec` fields in different order hash
     identically."""

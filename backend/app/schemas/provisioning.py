@@ -17,12 +17,49 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.schemas.mailbox import _validate_local_part
+
 IdentityStatus = Literal["pending", "active", "suspended", "deactivated"]
 
-# Written to `password_hash` on provisioned rows. Not a valid hash in any
-# scheme: `verify_password` and `verify_dovecot` both return False for every
-# input rather than raising, so it can never authenticate.
-UNUSABLE_PASSWORD_HASH = "!idm-provisioned-no-password"
+# Written to `password_hash` on provisioned rows. `verify_password` and
+# `verify_dovecot` both return False for every input rather than raising, so it
+# can never authenticate through this API.
+#
+# The `{CRYPT}` prefix is load-bearing, not decoration. Dovecot reads
+# `mailboxes.password_hash` directly, and a value with NO inline scheme prefix
+# is interpreted under `default_pass_scheme` — so if that were ever set to
+# PLAIN, a bare placeholder would become a working password shared by every
+# provisioned mailbox. Naming a scheme explicitly makes the value inert
+# whatever `default_pass_scheme` says. `*` is the conventional crypt(3) "no
+# password" marker and cannot be produced by any crypt implementation, so
+# nothing hashes to it.
+UNUSABLE_PASSWORD_HASH = "{CRYPT}*idm-provisioned-no-password"
+
+
+def _validate_alias_address(address: str) -> str:
+    """Reject anything that is not a plain `local@domain` address.
+
+    Unvalidated alias strings are a routing hazard, not just a tidiness issue:
+    `_split_address` splits on the LAST `@`, so `"@@acme.example.com"` yields a
+    local part of `"@"` — exactly the domain catch-all convention
+    `docker/postfix/pgsql/virtual_alias_catchall.cf` matches. A single
+    double-`@` typo would silently divert every unrouted address in the domain
+    into one mailbox. The local part is held to `_LOCAL_PART_RE`, the same
+    conservative subset the admin-facing mailbox and alias schemas use, which
+    excludes `@` and the empty string by construction.
+    """
+    local_part, separator, domain_part = address.strip().rpartition("@")
+    if not separator or not domain_part:
+        raise ValueError(
+            f"Invalid alias {address!r}: expected a local@domain address."
+        )
+    try:
+        _validate_local_part(local_part)
+    except ValueError:
+        raise ValueError(
+            f"Invalid alias {address!r}: {local_part!r} is not a valid local part."
+        ) from None
+    return address
 
 
 class AdminSpec(BaseModel):
@@ -57,6 +94,24 @@ class IdentityUpsert(BaseModel):
         if value is None:
             raise ValueError("quota_mb may be omitted, but not null.")
         return value
+
+    @field_validator("aliases")
+    @classmethod
+    def _validate_aliases(cls, value: list[str] | None) -> list[str]:
+        """Reject an explicit null, and validate every entry.
+
+        `[]` already expresses "remove all IdM-owned aliases", so null is
+        redundant rather than a third meaning — and accepting it would be a
+        silent divergence: it lands in `model_fields_set`, hashes as a distinct
+        payload, advances `last_synced_at` and writes a success audit row while
+        changing nothing. Same ruling as `quota_mb` above.
+
+        Field validators do not run on defaults, so OMITTING the field still
+        works and stays absent from `model_fields_set`.
+        """
+        if value is None:
+            raise ValueError("aliases may be omitted, but not null.")
+        return [_validate_alias_address(entry) for entry in value]
 
 
 class IdentityRead(BaseModel):
