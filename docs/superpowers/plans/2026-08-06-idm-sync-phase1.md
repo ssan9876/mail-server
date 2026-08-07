@@ -1078,7 +1078,7 @@ from app.models.domain import Domain
 @pytest.mark.asyncio
 async def test_create_mailbox_unscoped_needs_no_user(sessionmaker_):
     async with sessionmaker_() as session:
-        domain = Domain(name="acme.test")
+        domain = Domain(name="acme.example.com")
         session.add(domain)
         await session.commit()
         await session.refresh(domain)
@@ -1092,14 +1092,14 @@ async def test_create_mailbox_unscoped_needs_no_user(sessionmaker_):
             quota_mb=2048,
         )
         assert mailbox.local_part == "jane"
-        assert mailbox.maildir_path == "/maildata/acme.test/jane/"
+        assert mailbox.maildir_path == "/maildata/acme.example.com/jane/"
         assert mailbox.is_active is True
 
 
 @pytest.mark.asyncio
 async def test_local_part_taken_can_exclude_self(sessionmaker_):
     async with sessionmaker_() as session:
-        domain = Domain(name="acme2.test")
+        domain = Domain(name="acme2.example.com")
         session.add(domain)
         await session.commit()
         await session.refresh(domain)
@@ -1119,12 +1119,12 @@ async def test_local_part_taken_can_exclude_self(sessionmaker_):
 @pytest.mark.asyncio
 async def test_domain_get_by_name(sessionmaker_):
     async with sessionmaker_() as session:
-        session.add(Domain(name="acme3.test"))
+        session.add(Domain(name="acme3.example.com"))
         await session.commit()
 
-        found = await domain_service.get_by_name(session, "acme3.test")
-        assert found is not None and found.name == "acme3.test"
-        assert await domain_service.get_by_name(session, "nope.test") is None
+        found = await domain_service.get_by_name(session, "acme3.example.com")
+        assert found is not None and found.name == "acme3.example.com"
+        assert await domain_service.get_by_name(session, "nope.example.com") is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1302,14 +1302,14 @@ from app.schemas.provisioning import (
 
 
 def _valid(**overrides):
-    base = {"email": "jane@acme.test", "status": "active"}
+    base = {"email": "jane@acme.example.com", "status": "active"}
     base.update(overrides)
     return base
 
 
 def test_minimal_payload_is_valid():
     payload = IdentityUpsert(**_valid())
-    assert payload.email == "jane@acme.test"
+    assert payload.email == "jane@acme.example.com"
     assert payload.status == "active"
 
 
@@ -1503,7 +1503,7 @@ from sqlalchemy import select
 import pytest
 
 
-async def _seed_domain(sessionmaker_, name="corp.test"):
+async def _seed_domain(sessionmaker_, name="corp.example.com"):
     async with sessionmaker_() as session:
         domain = Domain(name=name)
         session.add(domain)
@@ -1513,7 +1513,7 @@ async def _seed_domain(sessionmaker_, name="corp.test"):
 
 
 def _payload(**overrides):
-    base = {"email": "jane@corp.test", "status": "active"}
+    base = {"email": "jane@corp.example.com", "status": "active"}
     base.update(overrides)
     return IdentityUpsert(**base)
 
@@ -1541,27 +1541,27 @@ async def test_unknown_domain_is_rejected(sessionmaker_):
     async with sessionmaker_() as session:
         with pytest.raises(UnprocessableError):
             await provisioning_service.upsert_identity(
-                session, "ext-2", _payload(email="jane@nowhere.test")
+                session, "ext-2", _payload(email="jane@nowhere.example.com")
             )
 
 
 @pytest.mark.asyncio
 async def test_inactive_domain_is_accepted(sessionmaker_):
     async with sessionmaker_() as session:
-        session.add(Domain(name="paused.test", is_active=False))
+        session.add(Domain(name="paused.example.com", is_active=False))
         await session.commit()
 
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ext-3", _payload(email="jane@paused.test")
+            session, "ext-3", _payload(email="jane@paused.example.com")
         )
         assert identity.mailbox_id is not None
 
 
 @pytest.mark.asyncio
 async def test_repeated_identical_push_is_a_no_op(sessionmaker_):
-    await _seed_domain(sessionmaker_, "noop.test")
-    payload = _payload(email="jane@noop.test", display_name="Jane")
+    await _seed_domain(sessionmaker_, "noop.example.com")
+    payload = _payload(email="jane@noop.example.com", display_name="Jane")
 
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(session, "ext-4", payload)
@@ -1579,16 +1579,16 @@ async def test_repeated_identical_push_is_a_no_op(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_rename_preserves_maildir_path(sessionmaker_):
-    await _seed_domain(sessionmaker_, "rename.test")
+    await _seed_domain(sessionmaker_, "rename.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ext-5", _payload(email="jane@rename.test")
+            session, "ext-5", _payload(email="jane@rename.example.com")
         )
         original_path = (await session.get(Mailbox, identity.mailbox_id)).maildir_path
 
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "ext-5", _payload(email="jane.doe@rename.test")
+            session, "ext-5", _payload(email="jane.doe@rename.example.com")
         )
         mailbox = await session.get(Mailbox, identity.mailbox_id)
         assert mailbox.local_part == "jane.doe"
@@ -1597,19 +1597,19 @@ async def test_rename_preserves_maildir_path(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_rename_onto_an_existing_address_conflicts(sessionmaker_):
-    domain = await _seed_domain(sessionmaker_, "clash.test")
+    domain = await _seed_domain(sessionmaker_, "clash.example.com")
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "ext-6a", _payload(email="taken@clash.test")
+            session, "ext-6a", _payload(email="taken@clash.example.com")
         )
         await provisioning_service.upsert_identity(
-            session, "ext-6b", _payload(email="jane@clash.test")
+            session, "ext-6b", _payload(email="jane@clash.example.com")
         )
 
     async with sessionmaker_() as session:
         with pytest.raises(ConflictError):
             await provisioning_service.upsert_identity(
-                session, "ext-6b", _payload(email="taken@clash.test")
+                session, "ext-6b", _payload(email="taken@clash.example.com")
             )
 
 
@@ -1619,12 +1619,12 @@ async def test_rename_onto_an_existing_address_conflicts(sessionmaker_):
     [("pending", False), ("active", True), ("suspended", False), ("deactivated", False)],
 )
 async def test_status_maps_to_is_active(sessionmaker_, status, expected_active):
-    await _seed_domain(sessionmaker_, f"st-{status}.test")
+    await _seed_domain(sessionmaker_, f"st-{status}.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
             session,
             f"ext-st-{status}",
-            _payload(email=f"jane@st-{status}.test", status=status),
+            _payload(email=f"jane@st-{status}.example.com", status=status),
         )
         mailbox = await session.get(Mailbox, identity.mailbox_id)
         assert mailbox.is_active is expected_active
@@ -1633,20 +1633,20 @@ async def test_status_maps_to_is_active(sessionmaker_, status, expected_active):
 @pytest.mark.asyncio
 async def test_suspended_does_not_stamp_deactivated_at(sessionmaker_):
     """A suspension is not an offboarding and must not start the retention clock."""
-    await _seed_domain(sessionmaker_, "susp.test")
+    await _seed_domain(sessionmaker_, "susp.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ext-7", _payload(email="jane@susp.test", status="suspended")
+            session, "ext-7", _payload(email="jane@susp.example.com", status="suspended")
         )
         assert identity.deactivated_at is None
 
 
 @pytest.mark.asyncio
 async def test_repeated_deactivation_does_not_move_the_stamp(sessionmaker_):
-    await _seed_domain(sessionmaker_, "deact.test")
+    await _seed_domain(sessionmaker_, "deact.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ext-8", _payload(email="jane@deact.test", status="deactivated")
+            session, "ext-8", _payload(email="jane@deact.example.com", status="deactivated")
         )
         first_stamp = identity.deactivated_at
         assert first_stamp is not None
@@ -1657,22 +1657,22 @@ async def test_repeated_deactivation_does_not_move_the_stamp(sessionmaker_):
         again = await provisioning_service.upsert_identity(
             session,
             "ext-8",
-            _payload(email="jane@deact.test", status="deactivated", display_name="J"),
+            _payload(email="jane@deact.example.com", status="deactivated", display_name="J"),
         )
         assert again.deactivated_at == first_stamp
 
 
 @pytest.mark.asyncio
 async def test_reactivation_clears_the_stamp(sessionmaker_):
-    await _seed_domain(sessionmaker_, "react.test")
+    await _seed_domain(sessionmaker_, "react.example.com")
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "ext-9", _payload(email="jane@react.test", status="deactivated")
+            session, "ext-9", _payload(email="jane@react.example.com", status="deactivated")
         )
 
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ext-9", _payload(email="jane@react.test", status="active")
+            session, "ext-9", _payload(email="jane@react.example.com", status="active")
         )
         mailbox = await session.get(Mailbox, identity.mailbox_id)
         assert identity.deactivated_at is None
@@ -1681,16 +1681,16 @@ async def test_reactivation_clears_the_stamp(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_absent_scalar_leaves_the_value_unchanged(sessionmaker_):
-    await _seed_domain(sessionmaker_, "scalar.test")
+    await _seed_domain(sessionmaker_, "scalar.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ext-10", _payload(email="jane@scalar.test", display_name="Jane")
+            session, "ext-10", _payload(email="jane@scalar.example.com", display_name="Jane")
         )
 
     async with sessionmaker_() as session:
         # display_name omitted entirely — must not be cleared.
         await provisioning_service.upsert_identity(
-            session, "ext-10", _payload(email="jane@scalar.test", quota_mb=8192)
+            session, "ext-10", _payload(email="jane@scalar.example.com", quota_mb=8192)
         )
         mailbox = await session.get(Mailbox, identity.mailbox_id)
         assert mailbox.display_name == "Jane"
@@ -1699,15 +1699,15 @@ async def test_absent_scalar_leaves_the_value_unchanged(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_explicit_null_clears_a_nullable_scalar(sessionmaker_):
-    await _seed_domain(sessionmaker_, "clear.test")
+    await _seed_domain(sessionmaker_, "clear.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ext-11", _payload(email="jane@clear.test", display_name="Jane")
+            session, "ext-11", _payload(email="jane@clear.example.com", display_name="Jane")
         )
 
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "ext-11", _payload(email="jane@clear.test", display_name=None)
+            session, "ext-11", _payload(email="jane@clear.example.com", display_name=None)
         )
         mailbox = await session.get(Mailbox, identity.mailbox_id)
         assert mailbox.display_name is None
@@ -1715,10 +1715,10 @@ async def test_explicit_null_clears_a_nullable_scalar(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_username_is_captured_when_sent(sessionmaker_):
-    await _seed_domain(sessionmaker_, "uname.test")
+    await _seed_domain(sessionmaker_, "uname.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ext-12", _payload(email="jane@uname.test", username="jdoe")
+            session, "ext-12", _payload(email="jane@uname.example.com", username="jdoe")
         )
         assert identity.idm_username == "jdoe"
 
@@ -2006,75 +2006,75 @@ async def _alias_local_parts(session, domain_id):
 
 @pytest.mark.asyncio
 async def test_aliases_are_created_and_pointed_at_the_mailbox(sessionmaker_):
-    domain = await _seed_domain(sessionmaker_, "al1.test")
+    domain = await _seed_domain(sessionmaker_, "al1.example.com")
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
             session,
             "al-1",
-            _payload("jane@al1.test", aliases=["j.doe@al1.test", "jd@al1.test"]),
+            _payload("jane@al1.example.com", aliases=["j.doe@al1.example.com", "jd@al1.example.com"]),
         )
         assert await _alias_local_parts(session, domain.id) == ["j.doe", "jd"]
         alias = (
             await session.execute(select(Alias).where(Alias.local_part == "j.doe"))
         ).scalar_one()
-        assert alias.destination == "jane@al1.test"
+        assert alias.destination == "jane@al1.example.com"
 
 
 @pytest.mark.asyncio
 async def test_alias_set_is_authoritative_when_present(sessionmaker_):
-    domain = await _seed_domain(sessionmaker_, "al2.test")
+    domain = await _seed_domain(sessionmaker_, "al2.example.com")
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "al-2", _payload("jane@al2.test", aliases=["a@al2.test", "b@al2.test"])
+            session, "al-2", _payload("jane@al2.example.com", aliases=["a@al2.example.com", "b@al2.example.com"])
         )
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "al-2", _payload("jane@al2.test", aliases=["b@al2.test"])
+            session, "al-2", _payload("jane@al2.example.com", aliases=["b@al2.example.com"])
         )
         assert await _alias_local_parts(session, domain.id) == ["b"]
 
 
 @pytest.mark.asyncio
 async def test_omitted_alias_field_leaves_them_untouched(sessionmaker_):
-    domain = await _seed_domain(sessionmaker_, "al3.test")
+    domain = await _seed_domain(sessionmaker_, "al3.example.com")
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "al-3", _payload("jane@al3.test", aliases=["a@al3.test"])
+            session, "al-3", _payload("jane@al3.example.com", aliases=["a@al3.example.com"])
         )
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "al-3", _payload("jane@al3.test", display_name="Jane")
+            session, "al-3", _payload("jane@al3.example.com", display_name="Jane")
         )
         assert await _alias_local_parts(session, domain.id) == ["a"]
 
 
 @pytest.mark.asyncio
 async def test_empty_alias_list_removes_all_idm_owned_aliases(sessionmaker_):
-    domain = await _seed_domain(sessionmaker_, "al4.test")
+    domain = await _seed_domain(sessionmaker_, "al4.example.com")
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "al-4", _payload("jane@al4.test", aliases=["a@al4.test"])
+            session, "al-4", _payload("jane@al4.example.com", aliases=["a@al4.example.com"])
         )
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "al-4", _payload("jane@al4.test", aliases=[])
+            session, "al-4", _payload("jane@al4.example.com", aliases=[])
         )
         assert await _alias_local_parts(session, domain.id) == []
 
 
 @pytest.mark.asyncio
 async def test_admin_created_alias_is_never_adopted_or_removed(sessionmaker_):
-    domain = await _seed_domain(sessionmaker_, "al5.test")
+    domain = await _seed_domain(sessionmaker_, "al5.example.com")
     async with sessionmaker_() as session:
         session.add(
-            Alias(domain_id=domain.id, local_part="handmade", destination="someone@al5.test")
+            Alias(domain_id=domain.id, local_part="handmade", destination="someone@al5.example.com")
         )
         await session.commit()
 
     async with sessionmaker_() as session:
         with pytest.raises(ConflictError):
             await provisioning_service.upsert_identity(
-                session, "al-5", _payload("jane@al5.test", aliases=["handmade@al5.test"])
+                session, "al-5", _payload("jane@al5.example.com", aliases=["handmade@al5.example.com"])
             )
 
     async with sessionmaker_() as session:
@@ -2086,29 +2086,29 @@ async def test_admin_created_alias_is_never_adopted_or_removed(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_alias_in_an_unhosted_domain_is_rejected(sessionmaker_):
-    await _seed_domain(sessionmaker_, "al6.test")
+    await _seed_domain(sessionmaker_, "al6.example.com")
     async with sessionmaker_() as session:
         with pytest.raises(UnprocessableError):
             await provisioning_service.upsert_identity(
-                session, "al-6", _payload("jane@al6.test", aliases=["j@elsewhere.test"])
+                session, "al-6", _payload("jane@al6.example.com", aliases=["j@elsewhere.example.com"])
             )
 
 
 @pytest.mark.asyncio
 async def test_a_rename_repoints_alias_destinations(sessionmaker_):
-    await _seed_domain(sessionmaker_, "al7.test")
+    await _seed_domain(sessionmaker_, "al7.example.com")
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "al-7", _payload("jane@al7.test", aliases=["j@al7.test"])
+            session, "al-7", _payload("jane@al7.example.com", aliases=["j@al7.example.com"])
         )
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "al-7", _payload("jane.doe@al7.test", aliases=["j@al7.test"])
+            session, "al-7", _payload("jane.doe@al7.example.com", aliases=["j@al7.example.com"])
         )
         alias = (
             await session.execute(select(Alias).where(Alias.local_part == "j"))
         ).scalar_one()
-        assert alias.destination == "jane.doe@al7.test"
+        assert alias.destination == "jane.doe@al7.example.com"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2284,18 +2284,18 @@ def _payload(email, **overrides):
 
 @pytest.mark.asyncio
 async def test_admin_block_creates_a_user_with_an_unusable_password(sessionmaker_):
-    domain = await _seed_domain(sessionmaker_, "ad1.test")
+    domain = await _seed_domain(sessionmaker_, "ad1.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
             session,
             "ad-1",
             _payload(
-                "jane@ad1.test",
-                admin={"role": "domain_admin", "domains": ["ad1.test"]},
+                "jane@ad1.example.com",
+                admin={"role": "domain_admin", "domains": ["ad1.example.com"]},
             ),
         )
         user = await session.get(User, identity.user_id)
-        assert user.email == "jane@ad1.test"
+        assert user.email == "jane@ad1.example.com"
         assert user.role is UserRole.DOMAIN_ADMIN
         assert user.is_active is True
         assert user.password_hash == UNUSABLE_PASSWORD_HASH
@@ -2307,14 +2307,14 @@ async def test_admin_block_creates_a_user_with_an_unusable_password(sessionmaker
 
 @pytest.mark.asyncio
 async def test_role_change_is_applied(sessionmaker_):
-    await _seed_domain(sessionmaker_, "ad2.test")
+    await _seed_domain(sessionmaker_, "ad2.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ad-2", _payload("jane@ad2.test", admin={"role": "domain_admin"})
+            session, "ad-2", _payload("jane@ad2.example.com", admin={"role": "domain_admin"})
         )
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "ad-2", _payload("jane@ad2.test", admin={"role": "superadmin"})
+            session, "ad-2", _payload("jane@ad2.example.com", admin={"role": "superadmin"})
         )
         user = await session.get(User, identity.user_id)
         assert user.role is UserRole.SUPERADMIN
@@ -2322,16 +2322,16 @@ async def test_role_change_is_applied(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_explicit_null_admin_deactivates_without_deleting(sessionmaker_):
-    await _seed_domain(sessionmaker_, "ad3.test")
+    await _seed_domain(sessionmaker_, "ad3.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ad-3", _payload("jane@ad3.test", admin={"role": "domain_admin"})
+            session, "ad-3", _payload("jane@ad3.example.com", admin={"role": "domain_admin"})
         )
         user_id = identity.user_id
 
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "ad-3", _payload("jane@ad3.test", admin=None)
+            session, "ad-3", _payload("jane@ad3.example.com", admin=None)
         )
         user = await session.get(User, user_id)
         assert user is not None, "the row must survive — audit FKs depend on it"
@@ -2340,14 +2340,14 @@ async def test_explicit_null_admin_deactivates_without_deleting(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_omitted_admin_leaves_the_record_alone(sessionmaker_):
-    await _seed_domain(sessionmaker_, "ad4.test")
+    await _seed_domain(sessionmaker_, "ad4.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ad-4", _payload("jane@ad4.test", admin={"role": "domain_admin"})
+            session, "ad-4", _payload("jane@ad4.example.com", admin={"role": "domain_admin"})
         )
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "ad-4", _payload("jane@ad4.test", display_name="Jane")
+            session, "ad-4", _payload("jane@ad4.example.com", display_name="Jane")
         )
         user = await session.get(User, identity.user_id)
         assert user.is_active is True
@@ -2356,16 +2356,16 @@ async def test_omitted_admin_leaves_the_record_alone(sessionmaker_):
 
 @pytest.mark.asyncio
 async def test_deactivated_status_also_deactivates_the_admin_record(sessionmaker_):
-    await _seed_domain(sessionmaker_, "ad5.test")
+    await _seed_domain(sessionmaker_, "ad5.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ad-5", _payload("jane@ad5.test", admin={"role": "domain_admin"})
+            session, "ad-5", _payload("jane@ad5.example.com", admin={"role": "domain_admin"})
         )
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
             session,
             "ad-5",
-            _payload("jane@ad5.test", status="deactivated", admin={"role": "domain_admin"}),
+            _payload("jane@ad5.example.com", status="deactivated", admin={"role": "domain_admin"}),
         )
         user = await session.get(User, identity.user_id)
         assert user.is_active is False
@@ -2373,32 +2373,32 @@ async def test_deactivated_status_also_deactivates_the_admin_record(sessionmaker
 
 @pytest.mark.asyncio
 async def test_unknown_admin_domain_is_rejected(sessionmaker_):
-    await _seed_domain(sessionmaker_, "ad6.test")
+    await _seed_domain(sessionmaker_, "ad6.example.com")
     async with sessionmaker_() as session:
         with pytest.raises(UnprocessableError):
             await provisioning_service.upsert_identity(
                 session,
                 "ad-6",
                 _payload(
-                    "jane@ad6.test",
-                    admin={"role": "domain_admin", "domains": ["nope.test"]},
+                    "jane@ad6.example.com",
+                    admin={"role": "domain_admin", "domains": ["nope.example.com"]},
                 ),
             )
 
 
 @pytest.mark.asyncio
 async def test_a_rename_moves_the_admin_email(sessionmaker_):
-    await _seed_domain(sessionmaker_, "ad7.test")
+    await _seed_domain(sessionmaker_, "ad7.example.com")
     async with sessionmaker_() as session:
         identity = await provisioning_service.upsert_identity(
-            session, "ad-7", _payload("jane@ad7.test", admin={"role": "domain_admin"})
+            session, "ad-7", _payload("jane@ad7.example.com", admin={"role": "domain_admin"})
         )
     async with sessionmaker_() as session:
         await provisioning_service.upsert_identity(
-            session, "ad-7", _payload("jane.doe@ad7.test", admin={"role": "domain_admin"})
+            session, "ad-7", _payload("jane.doe@ad7.example.com", admin={"role": "domain_admin"})
         )
         user = await session.get(User, identity.user_id)
-        assert user.email == "jane.doe@ad7.test"
+        assert user.email == "jane.doe@ad7.example.com"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2533,7 +2533,7 @@ async def svc(client, superadmin, sessionmaker_):
     admin_headers = await login_headers(client, ADMIN_EMAIL, ADMIN_PASSWORD)
     raw = await _service_token(client, admin_headers)
     async with sessionmaker_() as session:
-        session.add(Domain(name="api.test"))
+        session.add(Domain(name="api.example.com"))
         await session.commit()
     return {"Authorization": f"Bearer {raw}"}
 
@@ -2542,20 +2542,20 @@ async def svc(client, superadmin, sessionmaker_):
 async def test_upsert_creates_and_returns_state(client, svc):
     resp = await client.put(
         "/api/v1/provisioning/identities/ext-100",
-        json={"email": "jane@api.test", "status": "active", "display_name": "Jane"},
+        json={"email": "jane@api.example.com", "status": "active", "display_name": "Jane"},
         headers=svc,
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["external_id"] == "ext-100"
-    assert body["email"] == "jane@api.test"
+    assert body["email"] == "jane@api.example.com"
     assert body["status"] == "active"
     assert body["mailbox_id"] is not None
 
 
 @pytest.mark.asyncio
 async def test_upsert_is_idempotent_over_http(client, svc):
-    payload = {"email": "jane@api.test", "status": "active"}
+    payload = {"email": "jane@api.example.com", "status": "active"}
     first = await client.put(
         "/api/v1/provisioning/identities/ext-101", json=payload, headers=svc
     )
@@ -2570,7 +2570,7 @@ async def test_upsert_is_idempotent_over_http(client, svc):
 async def test_credential_field_is_rejected_over_http(client, svc):
     resp = await client.put(
         "/api/v1/provisioning/identities/ext-102",
-        json={"email": "jane@api.test", "status": "active", "password": "hunter2"},
+        json={"email": "jane@api.example.com", "status": "active", "password": "hunter2"},
         headers=svc,
     )
     assert resp.status_code == 422
@@ -2580,28 +2580,28 @@ async def test_credential_field_is_rejected_over_http(client, svc):
 async def test_unknown_domain_is_422_not_500(client, svc):
     resp = await client.put(
         "/api/v1/provisioning/identities/ext-103",
-        json={"email": "jane@unhosted.test", "status": "active"},
+        json={"email": "jane@unhosted.example.com", "status": "active"},
         headers=svc,
     )
     assert resp.status_code == 422
-    assert "unhosted.test" in resp.text
+    assert "unhosted.example.com" in resp.text
 
 
 @pytest.mark.asyncio
 async def test_collision_is_409(client, svc):
     await client.put(
         "/api/v1/provisioning/identities/ext-104a",
-        json={"email": "taken@api.test", "status": "active"},
+        json={"email": "taken@api.example.com", "status": "active"},
         headers=svc,
     )
     await client.put(
         "/api/v1/provisioning/identities/ext-104b",
-        json={"email": "other@api.test", "status": "active"},
+        json={"email": "other@api.example.com", "status": "active"},
         headers=svc,
     )
     resp = await client.put(
         "/api/v1/provisioning/identities/ext-104b",
-        json={"email": "taken@api.test", "status": "active"},
+        json={"email": "taken@api.example.com", "status": "active"},
         headers=svc,
     )
     assert resp.status_code == 409
@@ -2611,7 +2611,7 @@ async def test_collision_is_409(client, svc):
 async def test_get_returns_state_and_404s_for_unknown(client, svc):
     await client.put(
         "/api/v1/provisioning/identities/ext-105",
-        json={"email": "jane@api.test", "status": "active"},
+        json={"email": "jane@api.example.com", "status": "active"},
         headers=svc,
     )
     found = await client.get("/api/v1/provisioning/identities/ext-105", headers=svc)
@@ -2631,7 +2631,7 @@ async def test_delete_verb_does_not_exist(client, svc):
 
 @pytest.mark.asyncio
 async def test_audit_entry_written_once_per_real_change(client, svc, sessionmaker_):
-    payload = {"email": "audited@api.test", "status": "active"}
+    payload = {"email": "audited@api.example.com", "status": "active"}
     await client.put(
         "/api/v1/provisioning/identities/ext-106", json=payload, headers=svc
     )
@@ -2654,12 +2654,12 @@ async def test_a_failed_sync_writes_nothing_at_all(client, svc, sessionmaker_):
     """A conflict part-way through must leave no mailbox, identity, or audit row."""
     await client.put(
         "/api/v1/provisioning/identities/ext-107a",
-        json={"email": "occupied@api.test", "status": "active"},
+        json={"email": "occupied@api.example.com", "status": "active"},
         headers=svc,
     )
     resp = await client.put(
         "/api/v1/provisioning/identities/ext-107b",
-        json={"email": "occupied@api.test", "status": "active"},
+        json={"email": "occupied@api.example.com", "status": "active"},
         headers=svc,
     )
     assert resp.status_code == 409
@@ -2687,7 +2687,7 @@ async def test_status_round_trips_through_get(client, svc, status):
     collapse them."""
     await client.put(
         f"/api/v1/provisioning/identities/ext-st-{status}",
-        json={"email": f"u{status}@api.test", "status": status},
+        json={"email": f"u{status}@api.example.com", "status": status},
         headers=svc,
     )
     resp = await client.get(
@@ -2702,14 +2702,14 @@ async def test_provisioning_requires_a_token(client, svc):
     invalid token is 403. Only the second case must be indistinguishable."""
     resp = await client.put(
         "/api/v1/provisioning/identities/ext-108",
-        json={"email": "jane@api.test", "status": "active"},
+        json={"email": "jane@api.example.com", "status": "active"},
     )
     assert resp.status_code == 401
     assert resp.headers.get("WWW-Authenticate") == "Bearer"
 
     bad = await client.put(
         "/api/v1/provisioning/identities/ext-108",
-        json={"email": "jane@api.test", "status": "active"},
+        json={"email": "jane@api.example.com", "status": "active"},
         headers={"Authorization": "Bearer idm_not-a-real-token"},
     )
     assert bad.status_code == 403
