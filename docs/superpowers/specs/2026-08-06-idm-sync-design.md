@@ -3,43 +3,95 @@
 **Date:** 2026-08-06
 **Status:** Approved for planning
 **Scope:** Phase 1 of 4
+**Counterpart system:** `D:\identity-manager` — see its
+`docs/superpowers/specs/2026-08-04-identity-provider-core-design.md`
 
 ## Problem
 
-An external identity management system (built separately, by the same author)
-must be the source of truth for who has email here. Today mailboxes and admin
-users are created by hand in the dashboard. The IdM needs to create, update, and
-offboard both.
+An external identity provider is the source of truth for who has email here.
+Today mailboxes and admin users are created by hand in the dashboard. The IdM
+must own that lifecycle: create, update, suspend, and offboard.
+
+## The counterpart system
+
+The IdM is a single-tenant identity provider built on NestJS + Postgres +
+Keycloak. Two of its properties determine this design:
+
+**Keycloak owns every credential.** The IdM's first global constraint is that it
+never generates, transmits, or stores a credential. Keycloak stores passwords
+one-way and does not release them. There is therefore no password for the IdM to
+send us, and asking for one would violate the constraint the whole system is
+built around.
+
+**Changes leave the IdM through a transactional outbox.** A mutation writes its
+row, its audit entry, and an outbox event in one transaction; a worker drains
+the outbox and applies changes to a `target`. Targets are additive by design —
+`keycloak` today, with `active_directory` and `google_workspace` planned. The
+mail server becomes another target.
+
+Three properties of that worker shape our API:
+
+- It **reconciles to desired state and never applies a delta**, so it will
+  re-assert a user's full state on every retry.
+- It applies events **in order per aggregate**.
+- It retries with backoff and dead-letters visibly.
+
+So idempotency is not a nicety here; it is the contract the worker depends on. A
+declarative upsert is precisely what it needs to call.
 
 ## Decisions
 
 | Question | Decision |
 |---|---|
-| Direction | IdM pushes to a mail-server API |
-| API shape | Declarative upsert keyed by the IdM's stable user ID |
-| Admin login | OIDC SSO (phase 2); phase 1 only provisions the accounts |
-| Mailbox password | IdM sends it; stored as a Dovecot-compatible hash |
+| Direction | IdM pushes; the mail server is a new outbox target |
+| API shape | Declarative upsert keyed by the IdM's user ID |
+| Mailbox password | **Not synced.** App passwords, generated after SSO (phase 2) |
+| Admin login | OIDC against Keycloak (phase 2); phase 1 provisions the row |
 | Address | IdM sends the full address; the domain must already exist here |
-| Offboarding | Disable immediately; purge after a retention window (phase 4) |
+| Status model | The IdM's own four: pending, active, suspended, deactivated |
+| Offboarding | Disable immediately; purge mail after a retention window (phase 4) |
 | API auth | Service token, IdM on the internal Docker network |
 
 ## Phasing
 
-Phase 1 is this document: the provisioning API, mailbox and admin sync, display
-name, quota, aliases, and disable-on-deprovision.
+Phase 1 is this document: the provisioning API, mailbox and admin record sync,
+display name, quota, aliases, and status lifecycle. No credentials of any kind.
 
-Later phases, each getting its own spec and plan:
+Later phases, each getting its own spec:
 
-2. OIDC SSO login for the dashboard, and role mapping from IdM claims.
+2. **Keycloak OIDC + app passwords.** Admin dashboard SSO, mailbox portal SSO,
+   and per-device app passwords. This is the milestone that makes an
+   IdM-provisioned mailbox independently usable.
 3. Groups to distribution lists.
-4. Retention purge job for deprovisioned mailboxes.
+4. Retention purge job for deactivated mailboxes.
 
-Phase 4 is separate for a concrete reason, not just size: the backend container
+Phase 1 does not strand users. The existing admin dashboard can still set a
+mailbox password by hand (`app/api/v1/mailboxes.py`), so provisioned mailboxes
+remain usable by the current manual route until phase 2 lands.
+
+Phase 4 is separate for a concrete reason beyond size: the backend container
 does not mount the `maildata` volume (`docker-compose.yml:120,146` — only
-postfix and dovecot do). Deleting mail therefore needs a deployment change (a
-new mount or a `doveadm` call), not just application code.
+postfix and dovecot do). Deleting mail needs a deployment change, not just
+application code.
 
-## Constraints found in the existing system
+## Work required in the identity-manager repo
+
+Out of scope here, and needing its own spec in that repo:
+
+- A `mail_server` value in the outbox `target` column, and a connector that
+  calls this API.
+- `'mail_server'` added to `external_identities.system`.
+- A `sync_to_mail` flag on `attribute_definitions`, mirroring
+  `sync_to_keycloak`. The IdM's attribute propagation is default-deny, and mail
+  needs its own allowlist rather than borrowing Keycloak's — quota in particular
+  will live in the `attributes` JSONB.
+- Deciding whether mail deactivation is synchronous-first. The IdM already makes
+  that exception for Keycloak because offboarding cannot wait for a queue to
+  drain. The argument is stronger for mail: an offboarded employee holding an
+  open IMAP connection is still reading mail. Recommended, but it is that repo's
+  decision.
+
+## Constraints found in this repo
 
 **The API cannot touch the mail store.** Provisioning creates and disables
 mailbox rows; Maildir files are unreachable from the backend container.
@@ -62,7 +114,7 @@ Three new tables. No columns change on existing tables.
 
 ### `idm_service_tokens`
 
-How the IdM authenticates.
+How the IdM's connector authenticates.
 
 | Column | Notes |
 |---|---|
@@ -88,12 +140,13 @@ The link that makes the API declarative.
 | Column | Notes |
 |---|---|
 | `id` | UUID PK |
-| `external_id` | The IdM's stable user ID; unique, indexed |
+| `external_id` | The IdM's user UUID; unique, indexed |
+| `idm_username` | The IdM's `username` for this user |
 | `mailbox_id` | Nullable FK to `mailboxes.id`, `ON DELETE SET NULL` |
 | `user_id` | Nullable FK to `users.id`, `ON DELETE SET NULL` |
 | `last_synced_at` | Nullable |
 | `last_payload_hash` | Nullable; enables the no-op short circuit |
-| `deprovisioned_at` | Nullable; read by the phase-4 purge job |
+| `deactivated_at` | Nullable; read by the phase-4 purge job |
 | timestamps | Via `TimestampMixin` |
 
 Both FKs are nullable because an identity may be mail-only, admin-only, or both.
@@ -101,6 +154,11 @@ Both FKs are nullable because an identity may be mail-only, admin-only, or both.
 Keying on `external_id` rather than the address is what makes renames correct: a
 changed email becomes a rename of an existing mailbox, not an orphan plus a new
 empty one.
+
+`idm_username` is stored in phase 1 even though nothing reads it yet. Phase 2
+needs it to match a Keycloak token back to a local row, and the IdM's decision 1
+pins principal resolution to `username`. Capturing it now costs a column;
+backfilling it later means re-syncing every identity.
 
 ### `idm_identity_aliases`
 
@@ -136,14 +194,16 @@ the mail server is exactly what it is today.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `PUT` | `/identities/{external_id}` | Upsert; the only call the IdM needs |
+| `PUT` | `/identities/{external_id}` | Upsert; the only call the connector makes |
 | `GET` | `/identities/{external_id}` | Read back current state |
-| `DELETE` | `/identities/{external_id}` | Deprovision |
 | `GET` | `/health` | Validates the token, touches nothing |
 
-`GET` and `DELETE` return `404` for an unknown `external_id`. `DELETE` on an
-already-deprovisioned identity returns `200` and changes nothing, so the IdM can
-retry an offboarding safely.
+`GET` returns `404` for an unknown `external_id`.
+
+**There is no `DELETE`.** The IdM has no delete operation — `deactivated` is
+terminal and removal propagates as a `status_changed` event. Offboarding arrives
+as an ordinary upsert carrying `"status": "deactivated"`. Adding a delete verb
+here would invent a lifecycle the source system does not have.
 
 ### Token management — JWT auth, `require_superadmin`, `/api/v1/idm/tokens`
 
@@ -153,18 +213,22 @@ Create, list, revoke. Create returns the raw token exactly once.
 
 ```json
 {
+  "username": "jdoe",
   "email": "jane@acme.com",
   "display_name": "Jane Doe",
   "quota_mb": 4096,
   "status": "active",
-  "password": "…",
   "aliases": ["j.doe@acme.com"],
   "admin": { "role": "domain_admin", "domains": ["acme.com"] }
 }
 ```
 
-`status` is one of `active`, `suspended`, `deprovisioned`. `admin` may be
-`null`. `password` is required only when creating a mailbox.
+**No credential field exists on this payload, in either direction.** That is
+enforced by schema, and asserted by a test, so a future change cannot quietly
+reintroduce one.
+
+`status` is one of `pending`, `active`, `suspended`, `deactivated`, matching the
+IdM's lifecycle exactly. `admin` may be `null`.
 
 `aliases` entries are full addresses and must be in a domain hosted here; one
 that is not returns `422`. Each alias's destination is the identity's own
@@ -179,6 +243,25 @@ An absent scalar field means leave unchanged. An explicit `null` clears a
 nullable scalar. A present collection is the complete desired set; an absent
 collection is left untouched, so a minimal payload cannot wipe a user's aliases.
 
+## Status mapping
+
+| IdM status | Mailbox | Admin user | `deactivated_at` |
+|---|---|---|---|
+| `pending` | Row created, `is_active = false` | Created, inactive | untouched |
+| `active` | `is_active = true` | Active | cleared |
+| `suspended` | `is_active = false` | Inactive | untouched |
+| `deactivated` | `is_active = false` | Inactive | stamped if unset |
+
+`pending` creates the mailbox row rather than deferring it. The address is
+reserved the moment the IdM knows about the person, so a starter cannot lose
+their intended address to a collision between offer and start date. It cannot
+receive mail until activated.
+
+A suspension must never stamp `deactivated_at` — suspension is not offboarding
+and must not start the retention clock. Repeated `deactivated` pushes must not
+move an existing stamp, or the IdM's reconciliation job would extend the
+retention window indefinitely.
+
 ## Convergence algorithm
 
 `PUT /identities/{external_id}` runs these steps in one transaction:
@@ -191,55 +274,37 @@ collection is left untouched, so a minimal payload cannot wipe a user's aliases.
    domain back online require a full re-sync from the IdM.
 3. Load or create the `idm_identities` row, taking a row-level lock
    (`SELECT … FOR UPDATE`) so concurrent pushes for one user cannot interleave.
+   The IdM guarantees per-aggregate ordering, but two aggregates touching one
+   identity, or a reconciliation run overlapping live traffic, can still race.
 4. No-op check: if the canonical hash of the payload equals `last_payload_hash`,
-   update `last_synced_at` and return. Argon2 is salted, so without this every
-   repeated push rewrites the password hash and burns CPU for no change.
+   update `last_synced_at` and return. The IdM's worker re-asserts full desired
+   state on every retry and its reconciliation job re-pushes unchanged users
+   wholesale, so without this the audit log fills with entries recording no
+   change and every reconcile pass writes to every row.
 5. Mailbox:
-   - Create if absent. `password` required; `422` with an explicit message if
-     missing.
+   - Create if absent, with an unusable placeholder `password_hash` that no
+     input can hash to. The mailbox has no working credential until an app
+     password is issued in phase 2, or an admin sets one manually.
    - Rename if `email` changed, keeping `maildir_path` fixed so existing mail
      follows the user. Collision-check against mailboxes and aliases; `409` on
      conflict.
-   - Apply `display_name`, `quota_mb`, and `status`. `active` sets
-     `is_active = true` and clears `deprovisioned_at`. `suspended` sets
-     `is_active = false` and leaves `deprovisioned_at` alone — a suspension is
-     not an offboarding and must never start the retention clock.
-     `deprovisioned` sets `is_active = false` and stamps `deprovisioned_at` if
-     it is not already set, so repeated deprovision calls do not extend the
-     retention window.
-   - Rehash the password if one was sent, via `hash_for_dovecot`.
+   - Apply `display_name`, `quota_mb`, and the status mapping above.
 6. Aliases, when the field is present: add what is missing, remove IdM-owned
    ones no longer listed. A requested alias that exists but is not IdM-owned
    returns `409` rather than being silently adopted.
 7. Admin: an `admin` block ensures a `users` row with that role and ownership of
-   the listed domains. `"admin": null` deactivates the linked user rather than
-   deleting it. Passwords are never set on admin users — they log in via OIDC in
-   phase 2, so `password_hash` gets an unusable placeholder value that no input
-   can hash to.
+   the listed domains, and an unusable placeholder `password_hash`.
+   `"admin": null` deactivates the linked user rather than deleting it.
+
+   This mirrors what the IdM's own console does — its milestone 8 required a
+   local user row matching the Keycloak username plus a role grant before
+   authorization would work. Phase 2 resolves an SSO login to this row the same
+   way.
 8. Write one `idm.identity.synced` audit entry summarising what actually
    changed, with actor type `IDM` and `commit=False` so it shares the
    transaction.
 
 Returns `200` with the resulting state.
-
-## Deprovisioning
-
-`DELETE /identities/{external_id}`, or `status: "deprovisioned"` on an upsert:
-
-- `mailbox.is_active = false` — logins refused, new mail rejected
-- Linked admin user deactivated
-- IdM-owned aliases deactivated
-- `deprovisioned_at` stamped, if not already set
-- `last_payload_hash` cleared
-- Maildir untouched
-
-Clearing `last_payload_hash` is required for correctness, not tidiness. A
-`DELETE` changes state without changing any payload, so if the hash survived,
-re-pushing the user's unchanged `active` payload would match the stored hash,
-short-circuit at step 4, and silently fail to reactivate them.
-
-A later `PUT` with `status: "active"` fully reverses it, so a mistaken
-offboarding is a one-call fix.
 
 ## Dovecot alignment fix
 
@@ -278,13 +343,20 @@ New modules:
 
 ## Failure modes
 
+Error responses matter more than usual here: they are consumed by the IdM's
+worker, which decides from them whether to retry or dead-letter. `409` and `422`
+are permanent failures the connector should dead-letter rather than retry
+forever; `5xx` is retriable. This should be stated in the connector's spec too.
+
 | Situation | Response |
 |---|---|
 | Unknown, revoked, or expired token | `403`, without indicating which |
 | Domain not hosted here | `422`, names the domain |
 | Address collides with a non-IdM mailbox or alias | `409`, no partial write |
-| Create without a password | `422`, explicit message |
-| Malformed payload | `422` from Pydantic |
+| Alias in an unhosted domain | `422` |
+| Aliases on an identity with no mailbox | `422` |
+| `admin.domains` names an unknown domain | `422` |
+| Malformed payload, or any credential field present | `422` from Pydantic |
 | Concurrent push, same `external_id` | Serialised by row lock |
 | Mid-sync database error | Whole sync rolls back |
 
@@ -315,39 +387,43 @@ fixtures in `conftest.py`.
 provisioning token rejected on an admin endpoint; an operator JWT rejected on a
 provisioning endpoint.
 
+**No credentials:** a payload carrying `password`, `password_hash`, or any
+similar field is rejected `422`. This is asserted, not assumed — it is the
+constraint the counterpart system is built on.
+
 **Convergence:** create; idempotent re-push writes nothing, asserting
-`updated_at` and the password hash are both unchanged (this is the test that
-catches the salted-rehash bug); rename preserves `maildir_path`; quota and
-display-name updates; suspend then reactivate.
+`updated_at` is unchanged and no audit row was added (the property the IdM's
+reconciliation job depends on); rename preserves `maildir_path`; quota and
+display-name updates.
+
+**Status lifecycle:** each of the four statuses maps as tabled; `pending`
+creates an inactive mailbox; `suspended` does not stamp `deactivated_at`;
+repeated `deactivated` pushes do not move the stamp; `deactivated` then `active`
+reactivates and clears it.
 
 **Aliases:** add; remove IdM-owned; refuse to modify admin-created; `409` when
 adopting an existing non-IdM alias; an omitted `aliases` field leaves them
 alone.
 
 **Admin:** create with role and domains; role change; `"admin": null`
-deactivates without deleting.
+deactivates without deleting; the placeholder hash cannot be authenticated
+against by any input.
 
-**Failures:** unknown domain; collision; create without password; alias in an
-unhosted domain; aliases on an identity with no mailbox; `admin.domains` naming
-an unknown domain; a forced mid-sync error asserting full rollback.
-
-**Deprovision:** `DELETE` then re-push of the unchanged `active` payload
-reactivates the user — the regression test for the cleared `last_payload_hash`;
-`DELETE` twice is a no-op; a `suspended` push does not stamp
-`deprovisioned_at`; repeated `deprovisioned` pushes do not move it.
-
-**Audit:** exactly one `idm.identity.synced` entry per real change, and none on
-a no-op.
+**Failures:** every row of the failure table, plus a forced mid-sync error
+asserting full rollback.
 
 ## Out of scope
 
-Each of these gets its own spec: OIDC SSO login, groups to distribution lists,
-the retention purge job, and any pull or reconcile direction.
+Each of these gets its own spec: Keycloak OIDC login and app passwords, groups
+to distribution lists, the retention purge job, and any pull or reconcile
+direction. The `identity-manager` side of the integration is specified in that
+repo.
 
 ## Open flag for phase 2
 
-Pure OIDC SSO plus phase 1 provisioning admin users with unusable passwords
-means an IdM outage locks everyone out of mail administration. The phase 2 spec
-should decide whether the bootstrap `ADMIN_EMAIL` / `ADMIN_PASSWORD` superadmin
-(`app/core/config.py:50`) stays password-capable as break-glass access. Recorded
-here so the decision is not lost; it is not a phase 1 decision.
+With admin login moving to Keycloak OIDC and provisioned admin rows holding
+unusable placeholder passwords, a Keycloak outage would lock everyone out of
+mail administration. The phase 2 spec should decide whether the bootstrap
+`ADMIN_EMAIL` / `ADMIN_PASSWORD` superadmin (`app/core/config.py:50`) stays
+password-capable as break-glass access. Recorded here so the decision is not
+lost; it is not a phase 1 decision.
