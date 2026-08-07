@@ -81,10 +81,10 @@ Out of scope here, and needing its own spec in that repo:
 - A `mail_server` value in the outbox `target` column, and a connector that
   calls this API.
 - `'mail_server'` added to `external_identities.system`.
-- A `sync_to_mail` flag on `attribute_definitions`, mirroring
-  `sync_to_keycloak`. The IdM's attribute propagation is default-deny, and mail
-  needs its own allowlist rather than borrowing Keycloak's — quota in particular
-  will live in the `attributes` JSONB.
+- Four seeded attribute definitions the connector reads: `mail_enabled`
+  (who gets a mailbox), `mail_quota_mb`, `mail_aliases`, and `mail_admin_role`.
+- Making the outbox genuinely multi-target. This is the bulk of that work and
+  is larger than the connector itself; see the counterpart spec.
 - Deciding whether mail deactivation is synchronous-first. The IdM already makes
   that exception for Keycloak because offboarding cannot wait for a queue to
   drain. The argument is stronger for mail: an offboarded employee holding an
@@ -226,6 +226,13 @@ Create, list, revoke. Create returns the raw token exactly once.
 **No credential field exists on this payload, in either direction.** That is
 enforced by schema, and asserted by a test, so a future change cannot quietly
 reintroduce one.
+
+**The schema is closed — there is no free-form attribute bag.** This matters
+beyond tidiness. The IdM's attribute propagation to Keycloak is default-deny
+because anything reaching Keycloak can surface in a JWT claim; here the same
+protection is structural rather than a flag, since HR data has nowhere in the
+payload to go. Adding a field is a deliberate change to this schema, not a
+checkbox on an attribute definition.
 
 `status` is one of `pending`, `active`, `suspended`, `deactivated`, matching the
 IdM's lifecycle exactly. `admin` may be `null`.
