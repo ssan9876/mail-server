@@ -20,7 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, UnprocessableError
-from app.models.idm import IdmIdentity
+from app.models.alias import Alias
+from app.models.idm import IdmIdentity, IdmIdentityAlias
 from app.models.mailbox import Mailbox
 from app.schemas.provisioning import (
     UNUSABLE_PASSWORD_HASH,
@@ -104,6 +105,15 @@ async def upsert_identity(
         identity.idm_username = payload.username
 
     await _converge_mailbox(db, identity, domain, local_part, payload)
+
+    mailbox = await db.get(Mailbox, identity.mailbox_id)
+    if mailbox is not None:
+        await _converge_aliases(db, identity, mailbox, domain.name, payload)
+    elif payload.aliases:
+        # An alias must forward somewhere; without a mailbox there is no
+        # destination to point at.
+        raise UnprocessableError("Cannot set aliases on an identity with no mailbox.")
+
     _apply_lifecycle_stamp(identity, payload.status)
     identity.status = payload.status
 
@@ -171,6 +181,87 @@ async def _converge_mailbox(
         # in fields_set means a real value was sent.
         mailbox.quota_mb = payload.quota_mb
     mailbox.is_active = is_active
+
+
+async def _converge_aliases(
+    db: AsyncSession,
+    identity: IdmIdentity,
+    mailbox: Mailbox,
+    domain_name: str,
+    payload: IdentityUpsert,
+) -> None:
+    """Reconcile the IdM-owned alias set.
+
+    Only aliases recorded in `idm_identity_aliases` are ever modified or
+    removed. An alias an admin created by hand is never adopted — that returns
+    a conflict instead, so a sync can never quietly take ownership of something
+    it did not create.
+    """
+    destination = f"{mailbox.local_part}@{domain_name}"
+
+    owned_rows = (
+        await db.execute(
+            select(Alias, IdmIdentityAlias)
+            .join(IdmIdentityAlias, IdmIdentityAlias.alias_id == Alias.id)
+            .where(IdmIdentityAlias.identity_id == identity.id)
+        )
+    ).all()
+    owned = {alias for alias, _ in owned_rows}
+
+    # An omitted collection means "leave untouched" — only the destination is
+    # refreshed, so a rename still repoints aliases the IdM already owns.
+    if "aliases" not in payload.model_fields_set or payload.aliases is None:
+        for alias in owned:
+            alias.destination = destination
+        return
+
+    desired: dict[tuple[uuid.UUID, str], str] = {}
+    for address in payload.aliases:
+        alias_local, alias_domain_name = _split_address(address)
+        alias_domain = await domain_service.get_by_name(db, alias_domain_name)
+        if alias_domain is None:
+            raise UnprocessableError(
+                f"Alias domain {alias_domain_name} is not hosted here."
+            )
+        desired[(alias_domain.id, alias_local)] = address
+
+    owned_by_key = {(a.domain_id, a.local_part): a for a in owned}
+
+    for key, alias in owned_by_key.items():
+        if key not in desired:
+            await db.execute(
+                IdmIdentityAlias.__table__.delete().where(
+                    IdmIdentityAlias.alias_id == alias.id
+                )
+            )
+            await db.delete(alias)
+
+    for (domain_id, alias_local), _address in desired.items():
+        existing = owned_by_key.get((domain_id, alias_local))
+        if existing is not None:
+            existing.destination = destination
+            continue
+
+        clash = (
+            await db.execute(
+                select(Alias).where(
+                    Alias.domain_id == domain_id, Alias.local_part == alias_local
+                )
+            )
+        ).scalar_one_or_none()
+        if clash is not None:
+            raise ConflictError(
+                f"{alias_local}@… already exists and is not managed by the IdM."
+            )
+        if await mailbox_service.local_part_taken(db, domain_id, alias_local):
+            raise ConflictError(f"{alias_local}@… already exists (mailbox or alias).")
+
+        alias = Alias(
+            domain_id=domain_id, local_part=alias_local, destination=destination
+        )
+        db.add(alias)
+        await db.flush()
+        db.add(IdmIdentityAlias(identity_id=identity.id, alias_id=alias.id))
 
 
 def _apply_lifecycle_stamp(identity: IdmIdentity, status: str) -> None:
