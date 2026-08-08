@@ -92,6 +92,16 @@ async def delete_domain(
     domain_id: uuid.UUID, request: Request, current_user: CurrentUser, db: DbDep
 ) -> Response:
     await domain_service.delete_domain(db, current_user, domain_id)
+    # Re-export so the deleted domain's key file and selector-map entry are
+    # actually withdrawn. Deleting the row alone left a DECRYPTED private key
+    # on the shared volume permanently, and Rspamd signs on the presence of
+    # that FILE (path lookup plus a fallback selector), so a deleted domain
+    # stayed signable — see `dkim_export_service._prune_orphans`.
+    #
+    # NOTE for the operator: this does NOT withdraw the `_domainkey` DNS TXT
+    # record. This application never retracts DNS on delete, so retire that
+    # record too or the public key stays advertised.
+    await dkim_export_service.try_sync(db)
     await audit_service.record(
         db,
         action="domain.deleted",

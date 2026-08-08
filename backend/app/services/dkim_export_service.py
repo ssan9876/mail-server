@@ -43,6 +43,42 @@ def _write_key(domain: Domain, root: Path) -> None:
     os.chmod(key_path, _KEY_MODE)
 
 
+def _prune_orphans(root: Path, keep: set[str]) -> int:
+    """Delete exported keys for domains that no longer exist. Returns the count.
+
+    Without this, `delete_domain` removed the database row — including the only
+    ENCRYPTED copy of the private key — while the DECRYPTED export stayed on
+    the shared volume forever.
+
+    That is not merely untidy. Rspamd resolves signing keys by filesystem path
+    (`path = "/dkim/$domain/$selector.key"`) with a fallback
+    `selector = "mail"`, so the presence of the FILE is what makes a domain
+    signable — `selectors.map` is not the gate. A deleted domain therefore
+    stayed indefinitely signable, with no rotation path left (rotation operates
+    on a `Domain` row that no longer exists) and, because this application
+    never withdraws DNS records either, with its `_domainkey` TXT record still
+    published.
+
+    Deliberately conservative about WHAT it deletes: only `*.key` files, and
+    then the directory itself only if that left it empty. It never recurses and
+    never removes anything it did not write, so a misconfigured
+    `DKIM_KEYS_PATH` cannot turn this into an arbitrary-delete primitive.
+    """
+    removed = 0
+    for child in root.iterdir():
+        if not child.is_dir() or child.name in keep:
+            continue
+        for key_file in child.glob("*.key"):
+            key_file.unlink()
+            removed += 1
+        try:
+            child.rmdir()
+        except OSError:
+            # Something else lives in there — leave it rather than recurse.
+            pass
+    return removed
+
+
 async def sync_all(db: AsyncSession, root: str | os.PathLike[str] | None = None) -> int:
     """(Re)write every domain's key file and the selector map. Returns the
     number of domains exported."""
@@ -64,15 +100,29 @@ async def sync_all(db: AsyncSession, root: str | os.PathLike[str] | None = None)
 
     map_content = "\n".join(sorted(lines))
     (root_path / _MAP_NAME).write_text(map_content + "\n" if lines else "")
+
+    # Runs AFTER the writes so a domain that both exists and was just written
+    # is never a prune candidate, whatever order the rows came back in.
+    orphans = _prune_orphans(root_path, {domain.name for domain in domains})
+    if orphans:
+        logger.info("DKIM export removed %d orphaned key file(s)", orphans)
+
     return len(domains)
 
 
 async def try_sync(db: AsyncSession) -> bool:
     """Best-effort export; never raises. Used after domain mutations where the
-    DKIM volume may be absent (dev/tests)."""
+    DKIM volume may be absent (dev/tests).
+
+    Catches `DecryptionError` as well as `OSError`. It previously caught only
+    the latter, so its "never raises" contract was false in exactly the case
+    that matters: after a `SECRETS_ENCRYPTION_KEY` rotation without
+    re-encryption, one undecryptable domain would propagate out of every
+    domain mutation and 500 the request.
+    """
     try:
         await sync_all(db)
         return True
-    except OSError as exc:
+    except (OSError, crypto.DecryptionError) as exc:
         logger.warning("DKIM export skipped: %s", exc)
         return False

@@ -176,3 +176,56 @@ to restore signing — keep `SECRETS_ENCRYPTION_KEY` safe and backed up separate
 - [ ] Regular DB + Maildir backups scheduled.
 
 See [architecture.md](architecture.md) for how the pieces fit together.
+
+## Validating sender identity binding
+
+Added by a security audit. Two settings work as a pair — `smtpd_sender_login_maps`
+plus `reject_authenticated_sender_login_mismatch` in `docker/postfix/main.cf`,
+and `allow_hdrfrom_mismatch = false` in
+`docker/rspamd/local.d/dkim_signing.conf`.
+
+**What they close.** Before this, nothing bound an authenticated SMTP session to
+a sender identity, and Rspamd derives the DKIM signing domain from the `From:`
+header. Any authenticated mailbox user could send `From: anyone@<another hosted
+domain>` and have it signed with that domain's real key — a DMARC-aligned
+impersonation of a domain they have no relationship to. On a multi-domain
+platform where `domains.owner_id` assigns domains to different people, that is a
+tenant-isolation failure.
+
+**Why it needs validating rather than just deploying.** A wrong sender-login map
+rejects *every* authenticated send (visible immediately, `553 5.7.1 Sender
+address rejected: not owned by user`). A wrong Rspamd setting is worse because
+it is *silent*: mail still leaves, just unsigned, and you learn about it from
+recipients' DMARC reports days later.
+
+Run all five checks against staging before production:
+
+| # | Action | Expected |
+|---|---|---|
+| 1 | Authenticate as `jane@acme.com`, send `From: jane@acme.com` | Accepted, and `Authentication-Results` shows `dkim=pass` for `acme.com` |
+| 2 | Same login, send `From: <one of jane's own aliases>` | Accepted **and signed** — this is the case `allow_username_mismatch = true` preserves |
+| 3 | Same login, send `From: someone@<a different hosted domain>` | **Rejected** `553 5.7.1` — this is the vulnerability |
+| 4 | Deliver inbound mail from an external sender to `jane@acme.com` on port 25 | Accepted as before — `reject_authenticated_sender_login_mismatch` must not touch unauthenticated traffic |
+| 5 | Suspend a mailbox, then try to send as it | Rejected — both lookups filter `is_active = true` |
+
+Check 2 is the one most likely to regress: if it is accepted but arrives
+**unsigned**, `allow_username_mismatch` has been set to `false` somewhere.
+
+Inspect a live lookup with:
+
+```bash
+docker compose exec postfix postmap -q "jane@acme.com" \
+  pgsql:/etc/postfix/pgsql/virtual_mailbox_self.cf
+```
+
+An empty result for a real, active mailbox means the map is broken — fix that
+before deploying, or all authenticated sending stops.
+
+### Related: retiring a domain
+
+Deleting a domain now also withdraws its exported DKIM key and its
+`selectors.map` entry (previously the decrypted key stayed on the shared volume
+permanently, and Rspamd signs on the presence of that file). The application
+does **not** withdraw DNS. Retire the `<selector>._domainkey.<domain>` TXT
+record yourself, or the public key stays advertised for a domain you no longer
+host.
