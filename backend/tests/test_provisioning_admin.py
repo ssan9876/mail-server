@@ -81,6 +81,49 @@ async def test_explicit_null_admin_deactivates_without_deleting(sessionmaker_):
         user = await session.get(User, user_id)
         assert user is not None, "the row must survive — audit FKs depend on it"
         assert user.is_active is False
+        # Revocation must also land in the ROLE dimension, not only in
+        # `is_active` — see the next test for the sequence that proves why.
+        assert user.role is UserRole.USER
+
+
+@pytest.mark.asyncio
+async def test_null_admin_revocation_survives_a_later_push_that_omits_admin(sessionmaker_):
+    """Revocation must not be undone by an ordinary, unrelated later push.
+
+    Regression test for a real hole. `admin: null` used to set only
+    `is_active = False`, leaving `role` at SUPERADMIN/DOMAIN_ADMIN and
+    `identity.user_id` still linked. But `is_active` is ALSO written
+    unconditionally from the status mapping on every push, so the next
+    ordinary payload that omitted `admin` and carried `status: "active"` —
+    here a quota change, but equally a display-name edit or the connector
+    dropping a now-absent `mail_admin_role` attribute — restored the operator
+    at their previous role. Neither pre-existing test caught it:
+    `test_explicit_null_admin_deactivates_without_deleting` stops at the
+    revocation, and `test_omitted_admin_leaves_the_record_alone` omits `admin`
+    after a GRANT rather than after a REVOKE.
+    """
+    await _seed_domain(sessionmaker_, "ad9.example.com")
+    async with sessionmaker_() as session:
+        identity = await provisioning_service.upsert_identity(
+            session, "ad-9", _payload("jane@ad9.example.com", admin={"role": "superadmin"})
+        )
+        user_id = identity.user_id
+
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session, "ad-9", _payload("jane@ad9.example.com", admin=None)
+        )
+
+    # An ordinary push, unrelated to admin: different payload hash, so the
+    # no-op short circuit does not fire and convergence really runs.
+    async with sessionmaker_() as session:
+        await provisioning_service.upsert_identity(
+            session, "ad-9", _payload("jane@ad9.example.com", quota_mb=8192)
+        )
+        user = await session.get(User, user_id)
+        assert user is not None
+        assert user.role is UserRole.USER, "a revoked operator must not regain their role"
+        assert user.role is not UserRole.SUPERADMIN
 
 
 @pytest.mark.asyncio

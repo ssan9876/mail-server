@@ -448,8 +448,22 @@ async def _converge_admin(
         # deliberately overrides the status mapping above — an explicit
         # `"admin": null` means "no longer an operator" regardless of whether
         # the person is still an active employee.
+        #
+        # DEMOTE THE ROLE, not just `is_active`. Expressing revocation only as
+        # `is_active = False` was not durable: `is_active` is the SAME field
+        # the status mapping writes unconditionally a few lines above, on every
+        # push. So the very next ordinary payload that omitted `admin` and
+        # carried `status: "active"` — a display-name edit, a quota change, or
+        # the connector simply dropping a now-absent `mail_admin_role`
+        # attribute rather than sending an explicit null — set it straight back
+        # to True, silently restoring a revoked SUPERADMIN: `role` had never
+        # been touched and `identity.user_id` still pointed at the row.
+        # Revocation now lands in the ROLE dimension, which ONLY an `admin`
+        # block ever writes, so the two concerns this function's own docstring
+        # separates no longer collide on a single column.
         if user is not None:
             user.is_active = False
+            user.role = UserRole.USER
         return reassigned_domains
 
     # `users.email` is unique, but not every row is IdM-managed — e.g. the
