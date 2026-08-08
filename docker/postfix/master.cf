@@ -19,6 +19,20 @@ submission inet n       -       n       -       -       smtpd
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
+  # tempfail, NOT main.cf's global `accept`, and deliberately only on the
+  # authenticated submission paths. Rspamd applies DKIM here, so if the milter
+  # is unreachable `accept` means the message still goes out — unsigned, under
+  # the domain's own name, with nothing logged on either side. You find out
+  # from recipients' DMARC reports days later.
+  #
+  # tempfail defers instead: the client retries and the mail leaves once
+  # signing works again. Deferring a message is far cheaper than publishing an
+  # unauthenticated one.
+  #
+  # Inbound port 25 keeps `accept` on purpose — a milter outage must not bounce
+  # legitimate mail arriving from the internet, where no signing decision of
+  # ours is at stake.
+  -o milter_default_action=tempfail
 
 smtps     inet  n       -       n       -       -       smtpd
   -o syslog_name=postfix/smtps
@@ -27,6 +41,20 @@ smtps     inet  n       -       n       -       -       smtpd
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
+  # tempfail, NOT main.cf's global `accept`, and deliberately only on the
+  # authenticated submission paths. Rspamd applies DKIM here, so if the milter
+  # is unreachable `accept` means the message still goes out — unsigned, under
+  # the domain's own name, with nothing logged on either side. You find out
+  # from recipients' DMARC reports days later.
+  #
+  # tempfail defers instead: the client retries and the mail leaves once
+  # signing works again. Deferring a message is far cheaper than publishing an
+  # unauthenticated one.
+  #
+  # Inbound port 25 keeps `accept` on purpose — a milter outage must not bounce
+  # legitimate mail arriving from the internet, where no signing decision of
+  # ours is at stake.
+  -o milter_default_action=tempfail
 
 # --- Standard internal services --------------------------------------------
 # Required by Postfix 3.4+ when maillog_file is set (logs via postlogd → stdout).
