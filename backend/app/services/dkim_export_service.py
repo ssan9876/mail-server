@@ -123,6 +123,29 @@ async def try_sync(db: AsyncSession) -> bool:
     try:
         await sync_all(db)
         return True
+    except PermissionError as exc:
+        # Split out from the OSError arm below because it is not a benign
+        # "volume absent in dev" case at all: it means the export can NEVER
+        # succeed on this deployment, so every domain stays unsigned until
+        # someone changes the filesystem. A `warning` reading "skipped" made a
+        # permanent, total failure look like a transient one, and it stayed
+        # invisible until an explicit POST /domains/dkim/sync returned a 500.
+        #
+        # Real cause seen in the field: the dkim_keys volume is owned by root
+        # while this process runs as uid 10001, so _write_key cannot create the
+        # per-domain directory. The image now creates /dkim with the right
+        # owner, but Docker applies that only when a volume is FIRST created —
+        # an existing deployment needs a one-time chown, which is what this
+        # message tells the operator to do.
+        logger.error(
+            "DKIM export FAILED — no domain can be signed until this is fixed. "
+            "All outbound mail is leaving UNSIGNED. The DKIM volume is not "
+            "writable by this process (uid %s): %s. Fix with: docker run --rm "
+            "-v <stack>_dkim_keys:/d alpine chown -R 10001:10001 /d",
+            os.getuid(),
+            exc,
+        )
+        return False
     except (OSError, crypto.DecryptionError) as exc:
         logger.warning("DKIM export skipped: %s", exc)
         return False

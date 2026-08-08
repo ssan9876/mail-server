@@ -198,6 +198,32 @@ address rejected: not owned by user`). A wrong Rspamd setting is worse because
 it is *silent*: mail still leaves, just unsigned, and you learn about it from
 recipients' DMARC reports days later.
 
+**Before you start: confirm DKIM keys are actually exported.** Checks 1 and 2
+below assert mail is SIGNED, and that silently cannot happen if the key store
+is empty — you will see unsigned mail and reasonably, but wrongly, blame
+`allow_username_mismatch`.
+
+```bash
+docker compose exec rspamd ls /dkim/          # expect selectors.map + a dir per domain
+docker compose exec backend ls -ld /dkim      # must be owned by appuser (uid 10001)
+```
+
+If `/dkim` is owned by `root`, the export has never worked on this deployment
+and every domain is unsigned. The image now creates that directory with the
+right owner, but Docker applies image ownership only when a named volume is
+FIRST created, so a stack that has already run needs a one-time fix:
+
+```bash
+docker compose down
+docker run --rm -v "$(docker volume ls -q | grep dkim_keys)":/d alpine chown -R 10001:10001 /d
+docker compose up -d
+curl -X POST https://<web-host>/api/v1/domains/dkim/sync -H "Authorization: Bearer <superadmin-jwt>"
+```
+
+A domain also needs a keypair before anything can be exported — one is created
+by `POST /domains/{id}/dkim/rotate`. A domain that has never had one exports
+nothing, because `sync_all` selects only `dkim_private_key IS NOT NULL`.
+
 Run all five checks against staging before production:
 
 | # | Action | Expected |
