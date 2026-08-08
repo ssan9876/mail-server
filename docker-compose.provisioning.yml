@@ -1,0 +1,22 @@
+# IdM provisioning over the WireGuard tunnel — an OVERLAY, applied only on a
+# deployment where the identity manager runs on a different host.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.provisioning.yml up -d
+#
+# Why this is a separate file rather than a port mapping in the base compose:
+# the mapping binds to ${WIREGUARD_ADDRESS}, and if that variable were unset
+# in the base stack, `"${WIREGUARD_ADDRESS}:8081:8081"` collapses to
+# `":8081:8081"` — which publishes provisioning on EVERY interface, silently.
+# A stack that never opts in cannot make that mistake, because the mapping
+# does not exist there at all.
+#
+# Requires WIREGUARD_ADDRESS in .env — the tunnel address of THIS host (e.g.
+# 10.8.0.1), never 0.0.0.0 and never the public IP. Verify after starting:
+#
+#   ss -lntp | grep 8081     # must show 10.8.0.1:8081, not 0.0.0.0:8081
+#
+# The listener itself is docker/nginx/templates/20-provisioning.conf.template.
+services:
+  nginx:
+    ports:
+      - "${WIREGUARD_ADDRESS}:8081:8081"

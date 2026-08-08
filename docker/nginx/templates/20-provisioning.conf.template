@@ -1,0 +1,51 @@
+# --- IdM provisioning over the WireGuard tunnel -------------------------------
+#
+# A SECOND listener, bound to the tunnel address only. The public server block
+# (10-https.conf.template) keeps its `location ^~ /api/v1/provisioning
+# { return 404; }` completely untouched — this is not a hole in that block.
+#
+# Why this exists: the counterpart identity manager runs on a DIFFERENT host
+# (see its docs/deployment/mail-server-transport.md). Provisioning's whole
+# security argument is "a leaked token is useless from outside", which held
+# because these routes lived only on the `internal` Docker bridge. Binding this
+# listener to the WireGuard address keeps that sentence literally true across
+# the host boundary, rather than replacing it with a weaker one: the
+# provisioning port still never faces the public internet.
+#
+# WHY A PLAIN PORT, and not `listen <tunnel-address>:80`:
+#
+# nginx runs INSIDE a container on the `internal` bridge network. The host's
+# WireGuard address is not an interface in that namespace, so binding it here
+# could never work — nginx would fail to start. A tunnel-address variable
+# would not even be substituted here: entrypoint.sh's envsubst takes an
+# explicit four-variable whitelist (WEB_HOSTNAME, MAIL_HOSTNAME, TLS_CERT,
+# TLS_KEY), so anything outside it survives as a literal string and
+# `nginx -t` then rejects the directive.
+#
+# The address restriction is therefore done by Docker's port publishing, one
+# layer out: docker-compose.provisioning.yml maps this port to the host's
+# tunnel address ONLY. That overlay is a separate file precisely so the
+# default stack cannot accidentally publish provisioning on 0.0.0.0 — an
+# unset variable in an inline mapping would do exactly that, silently.
+server {
+    listen 8081;
+    server_name _;
+
+    # Required, not optional, now that provisioning is reachable from beyond
+    # the internal Docker network. The IdM sync spec records that these routes
+    # carry no application-level limiter of their own, and nginx's own limiter
+    # never saw them before because the public block returns 404 first — so
+    # this zone is the only request-volume control that exists on this path.
+    limit_req zone=provisioning burst=20 nodelay;
+
+    location /api/v1/provisioning {
+        include /etc/nginx/includes/proxy.conf;
+        proxy_pass http://backend:8000;
+    }
+
+    # Nothing else is served here. The tunnel exists for provisioning alone;
+    # the dashboard, API and webmail all stay on the public block.
+    location / {
+        return 404;
+    }
+}
