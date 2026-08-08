@@ -83,3 +83,36 @@ def test_client_ip_falls_back_to_peer_address():
 
 def test_client_ip_or_unknown_never_none():
     assert client_ip_or_unknown(_request({}, client=None)) == "unknown"
+
+
+def test_provisioning_inherits_the_global_default_rate_limit():
+    """Provisioning IS rate limited, and the design doc once claimed it was not.
+
+    slowapi's ``default_limits`` are opt-OUT: ``SlowAPIMiddleware`` applies them
+    to every route unless it is decorated ``@limiter.exempt``. The provisioning
+    router does neither, so it inherits the global 120/min like everything else.
+
+    Two prior claims reasoned from the absence of a ``@limiter.limit`` decorator
+    and concluded there was no limit at all. That is the inference this test
+    exists to stop: it pins the mechanism (a non-empty ``default_limits`` plus a
+    provisioning router carrying no exemption), so a future change that removes
+    either one fails here instead of silently making the documentation true
+    again by accident.
+
+    It also pins the connector contract: because a limit exists, provisioning
+    can answer ``429``, which the counterpart treats as RETRIABLE — never as a
+    permanent, dead-lettering failure.
+    """
+    from app.api.v1 import provisioning
+    from app.core.ratelimit import limiter
+
+    assert limiter._default_limits, "provisioning depends on a global default limit existing"
+
+    for route in provisioning.router.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        assert getattr(endpoint, "_rate_limit_exempt", False) is False, (
+            f"{endpoint.__name__} is exempt from the default limit — if that is "
+            "deliberate, the design doc's Security section must be updated to match"
+        )

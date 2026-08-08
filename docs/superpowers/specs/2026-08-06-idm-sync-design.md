@@ -394,13 +394,35 @@ can never satisfy a provisioning endpoint. This mirrors the isolation the
 existing code already enforces between user and mailbox principals
 (`app/api/deps.py:62`).
 
-**There is no rate limiting on the provisioning routes.** No `@limiter.limit`
-decorator is applied, and because the routes are blocked at the Nginx edge
-(above), nginx's `limit_req` zones never see provisioning traffic either. The
-control is network reachability plus the service token, not request volume — a
-caller that can reach these routes at all already holds a valid token on the
-internal Docker network. If provisioning is ever exposed beyond that network,
-a rate limit becomes required rather than optional.
+**Provisioning IS rate limited, at 120 requests/minute per source IP.**
+
+This paragraph previously claimed the opposite — "there is no rate limiting on
+the provisioning routes" — reasoning that no `@limiter.limit` decorator is
+applied and that nginx's `limit_req` zones never see this traffic. Both of
+those statements are true and both are irrelevant, because they enumerate the
+two mechanisms that do not apply and miss the one that does: `limiter`
+(`app/core/ratelimit.py:16-22`) is constructed with
+`default_limits=["{RATE_LIMIT_API_PER_MINUTE}/minute"]` — 120, per
+`app/core/config.py:77` — and `main.py:68` installs `SlowAPIMiddleware`
+globally. **slowapi's default limits are opt-OUT**: they apply to every route
+unless it is decorated `@limiter.exempt`. Provisioning neither decorates nor
+exempts itself, so it inherits the default like every other route.
+
+Two consequences follow, and the connector's authors need both:
+
+- **A provisioning call can return `429`.** That is neither `409`/`422`
+  (permanent, dead-letter) nor `5xx` (retriable) in the failure table above,
+  so the table was incomplete. `429` is RETRIABLE — a rate limit clears on its
+  own, and dead-lettering it would drop a legitimate identity. A bulk
+  reconciliation pass is the realistic way to hit it.
+- **The limit is keyed on `client_ip_or_unknown`**, which reads
+  `X-Forwarded-For`. Reaching provisioning at all requires the internal network
+  plus a valid token, so this is not an anonymous-bypass surface — but it does
+  mean the limit constrains an honest connector more reliably than a
+  determined one.
+
+The primary control remains network reachability plus the service token. This
+limit is defence in depth that was already there, undocumented.
 
 ## Testing
 
@@ -484,11 +506,15 @@ destination mailbox is deactivated. Delivery still fails, because the alias
 forwards to an inactive mailbox — but the alias continues to match, which
 suppresses the domain catch-all for that address.
 
-**Provisioning has no application-level rate limit.** The routes are blocked at
-the Nginx edge, so nginx's limiter never sees them, and no `@limiter.limit`
-decorator is applied. Low practical risk given 256-bit service tokens on an
-internal network, but it is not the defence-in-depth the Security section might
-imply.
+**~~Provisioning has no application-level rate limit.~~ WITHDRAWN — this
+accepted defect was never real.** It reasoned from the absence of a
+`@limiter.limit` decorator and of nginx `limit_req` coverage, and missed
+slowapi's globally-applied `default_limits` (opt-out, not opt-in). Provisioning
+has been limited to 120/min per source IP the whole time. See the Security
+section above for the corrected account and for the `429` the connector must
+expect. Recorded as withdrawn rather than deleted: an accepted-defect list that
+silently loses entries is not auditable, and "we believed this was missing and
+were wrong" is itself worth knowing.
 
 **Convergence is tested only on SQLite.** The migration tests run against real
 PostgreSQL, but every service-layer test uses SQLite, which ignores `VARCHAR`
