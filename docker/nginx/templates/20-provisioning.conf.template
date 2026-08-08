@@ -12,12 +12,23 @@
 # the host boundary, rather than replacing it with a weaker one: the
 # provisioning port still never faces the public internet.
 #
-# ${WIREGUARD_ADDRESS} is substituted by the entrypoint, exactly like every
-# other variable in these templates. It MUST be the tunnel address (e.g.
-# 10.8.0.1) — never 0.0.0.0, which would publish provisioning on every
-# interface and defeat the entire arrangement.
+# WHY A PLAIN PORT, and not `listen <tunnel-address>:80`:
+#
+# nginx runs INSIDE a container on the `internal` bridge network. The host's
+# WireGuard address is not an interface in that namespace, so binding it here
+# could never work — nginx would fail to start. A tunnel-address variable
+# would not even be substituted here: entrypoint.sh's envsubst takes an
+# explicit four-variable whitelist (WEB_HOSTNAME, MAIL_HOSTNAME, TLS_CERT,
+# TLS_KEY), so anything outside it survives as a literal string and
+# `nginx -t` then rejects the directive.
+#
+# The address restriction is therefore done by Docker's port publishing, one
+# layer out: docker-compose.provisioning.yml maps this port to the host's
+# tunnel address ONLY. That overlay is a separate file precisely so the
+# default stack cannot accidentally publish provisioning on 0.0.0.0 — an
+# unset variable in an inline mapping would do exactly that, silently.
 server {
-    listen ${WIREGUARD_ADDRESS}:80;
+    listen 8081;
     server_name _;
 
     # Required, not optional, now that provisioning is reachable from beyond
