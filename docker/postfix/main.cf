@@ -87,6 +87,42 @@ smtpd_recipient_restrictions =
     reject_non_fqdn_recipient
     reject_unknown_recipient_domain
 
+# --- Sender identity binding (security audit) -------------------------------
+# !! VALIDATE IN STAGING BEFORE PRODUCTION. A wrong sender-login map rejects
+# !! EVERY authenticated send. Validation procedure: docs/deployment.md.
+#
+# WHAT THIS CLOSES. Nothing previously bound an authenticated session to a
+# sender identity, and Rspamd derives the DKIM signing domain from the From:
+# header (`use_domain = "header"`) with `allow_hdrfrom_mismatch = true`. So any
+# authenticated mailbox user could send `From: anyone@<any-other-hosted-domain>`
+# and have it signed with THAT domain's real key — DMARC-aligned cross-tenant
+# impersonation, on a platform whose domains carry an `owner_id` and are
+# expected to belong to different people.
+#
+# WHY THESE TWO MAPS. A Dovecot login IS the full mailbox address, so:
+#   - virtual_mailbox_self.cf maps a mailbox to itself      -> its own login
+#   - virtual_alias_maps.cf   maps an alias to its destination mailbox, which
+#                             is that mailbox's login
+# A user may therefore send as their own address, or as any alias pointing at
+# it, and as nothing else. Both queries already filter `is_active = true`, so a
+# suspended mailbox cannot send at all. Reusing these rather than writing a
+# third query keeps ONE definition of "who owns this address".
+#
+# NOTE: a multi-destination (distribution-list) alias returns a comma-separated
+# list, which is exactly the format this parameter expects — so every member of
+# such a list may send as it. If that is not wanted, give lists their own map.
+smtpd_sender_login_maps =
+    pgsql:/etc/postfix/pgsql/virtual_mailbox_self.cf
+    pgsql:/etc/postfix/pgsql/virtual_alias_maps.cf
+
+# `reject_AUTHENTICATED_sender_login_mismatch`, not the unqualified form: it
+# applies ONLY to SASL-authenticated clients, so inbound port-25 mail from the
+# internet is untouched. permit_mynetworks first so internal relays, which do
+# not authenticate, are unaffected.
+smtpd_sender_restrictions =
+    permit_mynetworks
+    reject_authenticated_sender_login_mismatch
+
 # --- Rspamd milter (DKIM signing + spam scoring) ---------------------------
 milter_default_action = accept
 milter_protocol = 6
